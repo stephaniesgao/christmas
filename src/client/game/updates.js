@@ -88,6 +88,10 @@ export function updatePlayer(context, delta, elapsed) {
     jumpState,
     cameraTarget,
     camera,
+    tempVecA,
+    tempVecB,
+    tempVecC,
+    tempVecD,
   } = context;
 
   if (!dragState.active && !context.autoFollowPaused) {
@@ -127,18 +131,15 @@ export function updatePlayer(context, delta, elapsed) {
 
   const forwardInput = (inputState.forward ? 1 : 0) - (inputState.backward ? 1 : 0);
   const strafeInput = (inputState.right ? 1 : 0) - (inputState.left ? 1 : 0);
-  const forwardDir = new THREE.Vector3(
+  const forwardDir = tempVecA.set(
     -Math.sin(cameraOrbit.yaw),
     0,
     -Math.cos(cameraOrbit.yaw),
-  ).normalize();
-  const rightDir = new THREE.Vector3()
-    .crossVectors(forwardDir, new THREE.Vector3(0, 1, 0))
-    .normalize();
-
-  const moveVector = new THREE.Vector3();
-  if (forwardInput !== 0) moveVector.add(forwardDir.clone().multiplyScalar(forwardInput));
-  if (strafeInput !== 0) moveVector.add(rightDir.clone().multiplyScalar(strafeInput));
+  );
+  const rightDir = tempVecB.set(forwardDir.z, 0, -forwardDir.x);
+  const moveVector = tempVecC.set(0, 0, 0);
+  if (forwardInput !== 0) moveVector.addScaledVector(forwardDir, forwardInput);
+  if (strafeInput !== 0) moveVector.addScaledVector(rightDir, strafeInput);
 
   const speedMultiplier = movementState.boostTimer > 0 ? movementState.boostMultiplier : 1;
   const moveSpeed = movementState.baseSpeed * speedMultiplier;
@@ -167,14 +168,15 @@ export function updatePlayer(context, delta, elapsed) {
   if (onRink) {
     const hasInput = moveVector.lengthSq() > 0;
     if (hasInput) {
-      const accelDir = moveVector.clone().normalize();
+      const accelDir = tempVecD.copy(moveVector).normalize();
       iceVelocity.addScaledVector(accelDir, moveSpeed * 1.8 * delta);
     }
     iceVelocity.multiplyScalar(0.985);
-    const iceStep = iceVelocity.clone().multiplyScalar(delta);
-    const nextPos = localPlayer.group.position.clone().add(iceStep);
+    const iceStep = tempVecD.copy(iceVelocity).multiplyScalar(delta);
+    const nextPos = tempVecB.copy(localPlayer.group.position).add(iceStep);
     if (!blocked(nextPos)) {
-      localPlayer.group.position.copy(nextPos);
+      localPlayer.group.position.x = nextPos.x;
+      localPlayer.group.position.z = nextPos.z;
     } else {
       iceVelocity.set(0, 0, 0);
     }
@@ -198,11 +200,12 @@ export function updatePlayer(context, delta, elapsed) {
     const isMoving = moveVector.lengthSq() > 0;
     context.playerIsMoving = isMoving;
     if (isMoving) {
-      const facing = moveVector.clone().normalize();
+      const facing = tempVecD.copy(moveVector).normalize();
       const step = facing.multiplyScalar(delta * moveSpeed);
-      const nextPos = localPlayer.group.position.clone().add(step);
+      const nextPos = tempVecB.copy(localPlayer.group.position).add(step);
       if (!blocked(nextPos)) {
-        localPlayer.group.position.copy(nextPos);
+        localPlayer.group.position.x = nextPos.x;
+        localPlayer.group.position.z = nextPos.z;
       }
       const angle = Math.atan2(moveVector.x, moveVector.z);
       localPlayer.group.rotation.y = angle;
@@ -244,13 +247,13 @@ export function updatePlayer(context, delta, elapsed) {
   );
 
   cameraTarget.lerp(localPlayer.group.position, 0.35);
-  const offset = new THREE.Vector3(
+  const offset = tempVecA.set(
     Math.sin(cameraOrbit.yaw) * Math.cos(cameraOrbit.pitch),
     Math.sin(cameraOrbit.pitch),
     Math.cos(cameraOrbit.yaw) * Math.cos(cameraOrbit.pitch),
   ).multiplyScalar(Math.max(6, cameraOrbit.distance + zoomState.offset));
 
-  const desiredPosition = localPlayer.group.position.clone().add(offset);
+  const desiredPosition = tempVecB.copy(localPlayer.group.position).add(offset);
   camera.position.lerp(desiredPosition, 0.35);
   camera.lookAt(cameraTarget);
 }
