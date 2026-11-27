@@ -59,6 +59,9 @@
       <button id="music-toggle" class="bauble off" type="button" aria-label="Toggle music (M)" aria-pressed="false">
         <span aria-hidden="true">♪</span>
       </button>
+      <button id="photo-toggle" class="bauble green" type="button" aria-label="Photo mode (P)">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="7" width="18" height="12" rx="2.5" fill="none" stroke="currentColor" stroke-width="2"/><path d="M8 7l1.6-2.5h4.8L16 7" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/><circle cx="12" cy="13" r="3.4" fill="none" stroke="currentColor" stroke-width="2"/></svg>
+      </button>
 
       <div class="strand-bar">
         <div id="sockets"></div>
@@ -77,6 +80,8 @@
           <dt>Drag / scroll</dt><dd>look &amp; zoom</dd>
           <dt>Click a hook</dt><dd>throw the strand</dd>
           <dt>Esc / right-click</dt><dd>reel it back in</dd>
+          <dt>F</dt><dd>throw a snowball</dd>
+          <dt>P</dt><dd>photo mode</dd>
           <dt>Q</dt><dd>drop a bulb</dd>
           <dt>M</dt><dd>music</dd>
         </dl>
@@ -84,6 +89,17 @@
     </div>
 
     <div id="toast" role="status" aria-live="polite"></div>
+    <div id="speech" aria-live="polite"></div>
+
+    <div id="photo-ui">
+      <p class="photo-tip">Drag to frame your shot · scroll to zoom · Enter to snap</p>
+      <div class="photo-buttons">
+        <button id="hide-steph" class="tag" type="button">Hide Steph</button>
+        <button id="snap" class="btn" type="button">Snap!</button>
+        <button id="photo-done" class="tag" type="button">Done</button>
+      </div>
+    </div>
+    <div id="flash"></div>
     <div id="loading">Loading…</div>
 
     <section id="finale" class="overlay hidden">

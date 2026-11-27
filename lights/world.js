@@ -197,25 +197,30 @@ export function getGlowTexture() {
 }
 
 // ---------- sky ----------
+const SUN_DIR = new THREE.Vector3(0.78, 0.07, -0.62).normalize();
 function buildSky(scene) {
-  const sky = new THREE.Mesh(
-    new THREE.SphereGeometry(500, 32, 16),
-    new THREE.ShaderMaterial({
-      side: THREE.BackSide,
-      depthWrite: false,
-      fog: false,
-      uniforms: {},
-      vertexShader: `varying vec3 vP; void main(){ vP = normalize(position); gl_Position = projectionMatrix*modelViewMatrix*vec4(position,1.0); }`,
-      fragmentShader: `varying vec3 vP; void main(){
+  const skyMat = new THREE.ShaderMaterial({
+    side: THREE.BackSide,
+    depthWrite: false,
+    fog: false,
+    uniforms: {
+      uHorizon: { value: new THREE.Color(0.13, 0.16, 0.32) },
+      uTop: { value: new THREE.Color(0.01, 0.02, 0.07) },
+      uSun: { value: SUN_DIR.clone() },
+      uSunColor: { value: new THREE.Color(1, 0.7, 0.45) },
+      uDawn: { value: 0 },
+    },
+    vertexShader: `varying vec3 vP; void main(){ vP = normalize(position); gl_Position = projectionMatrix*modelViewMatrix*vec4(position,1.0); }`,
+    fragmentShader: `uniform vec3 uHorizon; uniform vec3 uTop; uniform vec3 uSun; uniform vec3 uSunColor; uniform float uDawn;
+      varying vec3 vP; void main(){
         float h = clamp(vP.y*0.5+0.5,0.0,1.0);
-        vec3 horizon = vec3(0.13,0.16,0.32);
-        vec3 top = vec3(0.01,0.02,0.07);
-        vec3 col = mix(horizon, top, smoothstep(0.45,0.95,h));
+        vec3 col = mix(uHorizon, uTop, smoothstep(0.45,0.95,h));
+        float s = max(dot(normalize(vP), uSun), 0.0);
+        col += uSunColor * (pow(s, 6.0) * 0.55 + pow(s, 120.0) * 1.2) * uDawn;
         gl_FragColor = vec4(col,1.0);
       }`,
-    }),
-  );
-  scene.add(sky);
+  });
+  scene.add(new THREE.Mesh(new THREE.SphereGeometry(500, 32, 16), skyMat));
 
   const r = rand(42);
   const count = 1600;
@@ -229,18 +234,19 @@ function buildSky(scene) {
   }
   const geo = new THREE.BufferGeometry();
   geo.setAttribute('position', new THREE.BufferAttribute(pos, 3));
-  const stars = new THREE.Points(
-    geo,
-    new THREE.PointsMaterial({ color: 0xffffff, size: 1.6, sizeAttenuation: false, fog: false, transparent: true, opacity: 0.85 }),
-  );
-  scene.add(stars);
+  const starMat = new THREE.PointsMaterial({ color: 0xffffff, size: 1.6, sizeAttenuation: false, fog: false, transparent: true, opacity: 0.85 });
+  scene.add(new THREE.Points(geo, starMat));
 
-  const moon = new THREE.Mesh(
-    new THREE.SphereGeometry(14, 24, 16),
-    new THREE.MeshBasicMaterial({ color: new THREE.Color(0xfff4dc).multiplyScalar(1.4), fog: false }),
-  );
+  const moonMat = new THREE.MeshBasicMaterial({ color: new THREE.Color(0xfff4dc).multiplyScalar(1.4), fog: false, transparent: true });
+  const moon = new THREE.Mesh(new THREE.SphereGeometry(14, 24, 16), moonMat);
   moon.position.set(-180, 210, -300);
   scene.add(moon);
+
+  const sunMat = new THREE.MeshBasicMaterial({ color: new THREE.Color(1.6, 1.1, 0.7), fog: false, transparent: true, opacity: 0 });
+  const sun = new THREE.Mesh(new THREE.SphereGeometry(18, 24, 16), sunMat);
+  sun.position.copy(SUN_DIR).multiplyScalar(440).add(new THREE.Vector3(0, -30, 0));
+  scene.add(sun);
+  return { skyMat, starMat, moonMat, sun, sunMat };
 }
 
 // ---------- extra textures ----------
@@ -388,10 +394,12 @@ function buildForest(scene, colliders, avoid) {
   spots.forEach((t, i) => {
     m.compose(p.set(t.x, 1 * t.s, t.z), q.identity(), sc.set(t.sx, t.s, t.sx));
     trunk.setMatrixAt(i, m);
-    colliders.push({ x: t.x, z: t.z, r: 1.1 * t.sx, br: 2.5 * t.sx, top: 7.5 * t.s });
+    // block at the lowest branches, not just the trunk
+    colliders.push({ x: t.x, z: t.z, r: 2.3 * t.sx, br: 2.5 * t.sx, top: 7.5 * t.s });
   });
   trunk.castShadow = true;
   scene.add(trunk);
+  const tierMeshes = [];
 
   const greens = [new THREE.Color(0x1d4a36), new THREE.Color(0x2a6045), new THREE.Color(0x335f3a), new THREE.Color(0x1f5246)];
   const needleMat = new THREE.MeshStandardMaterial({ map: needleTex, roughness: 0.85, flatShading: true, side: THREE.DoubleSide });
@@ -412,7 +420,53 @@ function buildForest(scene, colliders, avoid) {
     });
     mesh.castShadow = true;
     scene.add(mesh, snow);
+    tierMeshes.push({ mesh, snow, tier });
   });
+
+  // trees remember how to redraw themselves so a snowball can shake one
+  const hr = rand(808);
+  const trees = spots.map((t, i) => ({ ...t, index: i, shake: 0, snowLeft: 1, hasBulb: hr() < 0.3 }));
+  const tm = new THREE.Matrix4();
+  const tq = new THREE.Quaternion();
+  const tilt = new THREE.Quaternion();
+  const tp = new THREE.Vector3();
+  const ts = new THREE.Vector3();
+  function redraw(t, wobble) {
+    tilt.setFromEuler(new THREE.Euler(wobble * 0.6, 0, wobble));
+    tierMeshes.forEach(({ mesh, snow, tier }, ti) => {
+      tq.setFromAxisAngle(up, t.rot + ti * 0.7).premultiply(tilt);
+      // lean the whole tree from its base
+      const y = tier.y * t.s;
+      tp.set(t.x + wobble * y * 0.6, y, t.z + wobble * 0.6 * y * 0.6);
+      tm.compose(tp, tq, ts.set(t.sx, t.s, t.sx));
+      mesh.setMatrixAt(t.index, tm);
+      const sy = (tier.y + tier.h * 0.27) * t.s;
+      tp.set(t.x + wobble * sy * 0.6, sy, t.z + wobble * 0.6 * sy * 0.6);
+      const k = Math.max(0.0001, t.snowLeft);
+      tm.compose(tp, tq, ts.set(t.sx * k, t.s * k, t.sx * k));
+      snow.setMatrixAt(t.index, tm);
+      mesh.instanceMatrix.needsUpdate = true;
+      snow.instanceMatrix.needsUpdate = true;
+    });
+  }
+  const active = new Set();
+  return {
+    trees,
+    shake(t) {
+      t.shake = 1;
+      t.snowLeft = 0;
+      active.add(t);
+    },
+    update(dt, time) {
+      for (const t of active) {
+        t.shake = Math.max(0, t.shake - dt * 1.2);
+        t.snowLeft = Math.min(1, t.snowLeft + dt / 25); // snow settles back slowly
+        const wobble = Math.sin(time * 22) * 0.05 * t.shake;
+        redraw(t, wobble);
+        if (t.shake === 0 && t.snowLeft >= 1) active.delete(t);
+      }
+    },
+  };
 }
 
 // low snow mounds scattered across the clearing
@@ -694,6 +748,7 @@ function buildCabin(scene, style, index, position, rotationY) {
 
   // windows: glowing panes, mullions, shutters, snowy sills
   const windowMat = new THREE.MeshStandardMaterial({ color: 0x1a1a24, emissive: 0xffb860, emissiveIntensity: 0.05, roughness: 0.4 });
+  const windowGlows = [];
   const shutterMat = new THREE.MeshStandardMaterial({ color: style.door, map: plankTex, roughness: 0.75 });
   const windowSpots = [
     [-3.2, 2.7, zf + 0.04, 0],
@@ -722,6 +777,14 @@ function buildCabin(scene, style, index, position, rotationY) {
       sh.position.set(s * 1.3, 0, 0.02);
       wg.add(sh);
     }
+    // soft warm halo that fades in once the cabin is decorated
+    const halo = new THREE.Sprite(
+      new THREE.SpriteMaterial({ map: getGlowTexture(), color: 0xffb35c, transparent: true, opacity: 0, blending: THREE.AdditiveBlending, depthWrite: false }),
+    );
+    halo.position.z = 0.35;
+    halo.scale.set(3.4, 3, 1);
+    wg.add(halo);
+    windowGlows.push(halo);
     group.add(wg);
   }
 
@@ -804,9 +867,11 @@ function buildCabin(scene, style, index, position, rotationY) {
   return {
     index,
     name: style.name,
+    doorColor: style.door,
     group,
     hooks,
     windowMat,
+    windowGlows,
     lampMat,
     light,
     wreath,
@@ -829,6 +894,88 @@ function updateSmoke(cabins, dt, t) {
       puff.material.opacity = c.smokeLevel * 0.35 * Math.sin(k * Math.PI);
     }
   }
+}
+
+
+// ---------- frozen pond ----------
+const iceTex = canvasTex(512, 512, (g, w, h) => {
+  const r = rand(404);
+  const grad = g.createRadialGradient(w / 2, h / 2, 20, w / 2, h / 2, w / 2);
+  grad.addColorStop(0, '#bfe3f7');
+  grad.addColorStop(0.8, '#a6d1ee');
+  grad.addColorStop(1, '#e8f4fb');
+  g.fillStyle = grad;
+  g.fillRect(0, 0, w, h);
+  // skate scratches
+  g.lineCap = 'round';
+  for (let i = 0; i < 70; i++) {
+    g.strokeStyle = `rgba(255,255,255,${0.15 + r() * 0.3})`;
+    g.lineWidth = 0.8 + r() * 1.5;
+    const x = r() * w;
+    const y = r() * h;
+    const len = 40 + r() * 120;
+    const a = r() * Math.PI;
+    g.beginPath();
+    g.moveTo(x, y);
+    g.quadraticCurveTo(x + Math.cos(a) * len * 0.5 + (r() - 0.5) * 30, y + Math.sin(a) * len * 0.5 + (r() - 0.5) * 30, x + Math.cos(a) * len, y + Math.sin(a) * len);
+    g.stroke();
+  }
+  // a few branching cracks
+  for (let c = 0; c < 6; c++) {
+    let x = r() * w;
+    let y = r() * h;
+    let a = r() * Math.PI * 2;
+    g.strokeStyle = 'rgba(255,255,255,0.6)';
+    g.lineWidth = 1.2;
+    g.beginPath();
+    g.moveTo(x, y);
+    for (let k = 0; k < 8; k++) {
+      a += (r() - 0.5) * 1.2;
+      x += Math.cos(a) * 14;
+      y += Math.sin(a) * 14;
+      g.lineTo(x, y);
+    }
+    g.stroke();
+  }
+});
+
+function buildPond(scene, center, radius) {
+  const group = new THREE.Group();
+  group.position.copy(center);
+  const ice = new THREE.Mesh(
+    new THREE.CircleGeometry(radius, 48),
+    new THREE.MeshStandardMaterial({ map: iceTex, roughness: 0.12, metalness: 0.15, transparent: true, opacity: 0.8, emissive: 0x3a6a8a, emissiveIntensity: 0.25 }),
+  );
+  ice.rotation.x = -Math.PI / 2;
+  ice.position.y = 0.06;
+  ice.receiveShadow = true;
+  // dark water below so the ice reads as a pond, with frozen bulbs sandwiched between
+  const water = new THREE.Mesh(new THREE.CircleGeometry(radius, 48), new THREE.MeshBasicMaterial({ color: 0x0d2235 }));
+  water.rotation.x = -Math.PI / 2;
+  water.position.y = -0.25;
+  const bank = new THREE.Mesh(new THREE.TorusGeometry(radius + 0.2, 0.55, 8, 48), snowMaterial());
+  bank.rotation.x = Math.PI / 2;
+  bank.scale.z = 0.45;
+  bank.position.y = 0.05;
+  group.add(water, ice, bank);
+  // cattails poking out of the snow at the edge
+  const r = rand(77);
+  const stemMat = new THREE.MeshStandardMaterial({ color: 0x6b6a3a });
+  const headMat = new THREE.MeshStandardMaterial({ color: 0x4a2f1e });
+  for (let i = 0; i < 9; i++) {
+    const a = 0.4 + r() * 1.6 + (i > 4 ? Math.PI : 0);
+    const x = Math.cos(a) * (radius + 0.3);
+    const z = Math.sin(a) * (radius + 0.3);
+    const h = 1.2 + r() * 0.8;
+    const stem = new THREE.Mesh(new THREE.CylinderGeometry(0.03, 0.04, h, 5), stemMat);
+    stem.position.set(x, h / 2, z);
+    stem.rotation.z = (r() - 0.5) * 0.3;
+    const head = new THREE.Mesh(new THREE.CapsuleGeometry(0.08, 0.3, 4, 6), headMat);
+    head.position.set(x, h - 0.1, z);
+    group.add(stem, head);
+  }
+  scene.add(group);
+  return { center: center.clone(), radius };
 }
 
 // ---------- lamp posts ----------
@@ -892,16 +1039,21 @@ function buildSnowfall(scene) {
 // ---------- public ----------
 export function buildWorld(scene) {
   scene.fog = new THREE.FogExp2(0x10183a, 0.011);
-  buildSky(scene);
+  const sky = buildSky(scene);
 
-  scene.add(new THREE.HemisphereLight(0x6f84c4, 0x1c2238, 0.9));
+  const hemi = new THREE.HemisphereLight(0x6f84c4, 0x1c2238, 0.9);
+  scene.add(hemi);
   const moon = new THREE.DirectionalLight(0xb9caff, 1.1);
-  moon.position.set(-40, 60, -30);
   moon.castShadow = true;
   moon.shadow.mapSize.set(2048, 2048);
-  Object.assign(moon.shadow.camera, { left: -70, right: 70, top: 70, bottom: -70, near: 1, far: 200 });
-  moon.shadow.bias = -0.0008;
-  scene.add(moon);
+  // a tight shadow box that follows Steph keeps shadows crisp
+  Object.assign(moon.shadow.camera, { left: -42, right: 42, top: 42, bottom: -42, near: 1, far: 220 });
+  moon.shadow.bias = -0.0006;
+  moon.shadow.normalBias = 0.04;
+  moon.shadow.radius = 3;
+  scene.add(moon, moon.target);
+  const lightOffset = new THREE.Vector3(-40, 60, -30);
+  const snapped = new THREE.Vector3();
 
   const ground = new THREE.Mesh(
     new THREE.CircleGeometry(220, 64),
@@ -937,14 +1089,48 @@ export function buildWorld(scene) {
     buildLamp(scene, Math.cos(a) * 19, Math.sin(a) * 19, colliders);
   }
 
-  const avoid = [{ x: 0, z: 0, r: 17 }, ...cabins.map((c) => ({ x: c.group.position.x, z: c.group.position.z, r: 13 }))];
+  // a frozen pond out past the cabins, between two of them
+  const pondAngle = ((1.5 / 5) * Math.PI * 2 + Math.PI / 2);
+  const pondCenter = new THREE.Vector3(Math.cos(pondAngle) * 56, 0, Math.sin(pondAngle) * 56);
+  const pond = buildPond(scene, pondCenter, 9);
+
+  const avoid = [{ x: 0, z: 0, r: 17 }, { x: pondCenter.x, z: pondCenter.z, r: 14 }, ...cabins.map((c) => ({ x: c.group.position.x, z: c.group.position.z, r: 13 }))];
   // keep a clear walkway from plaza to each door
   cabins.forEach((c) => {
     const p = c.group.position;
     avoid.push({ x: p.x * 0.6, z: p.z * 0.6, r: 7 });
   });
-  buildForest(scene, colliders, avoid);
+  const forest = buildForest(scene, colliders, avoid);
   buildDrifts(scene, avoid);
+
+  // time of day: 0 = deep night, 1 = sunrise
+  const C = (hex) => new THREE.Color(hex);
+  const nightHorizon = C(0x21294f);
+  const nightTop = C(0x02040f);
+  const preHorizon = C(0x5d4672);
+  const preTop = C(0x0f1636);
+  const dawnHorizon = C(0xf7a37c);
+  const dawnTop = C(0x6d8fc4);
+  const mix3 = (a, b, c2, k, out) => (k < 0.5 ? out.copy(a).lerp(b, k * 2) : out.copy(b).lerp(c2, (k - 0.5) * 2));
+  const tmpCol = new THREE.Color();
+  function setTimeOfDay(k) {
+    mix3(nightHorizon, preHorizon, dawnHorizon, k, sky.skyMat.uniforms.uHorizon.value);
+    mix3(nightTop, preTop, dawnTop, k, sky.skyMat.uniforms.uTop.value);
+    sky.skyMat.uniforms.uDawn.value = Math.max(0, (k - 0.45) / 0.55);
+    sky.starMat.opacity = 0.85 * Math.max(0, 1 - k * 1.25);
+    sky.moonMat.opacity = Math.max(0, 1 - k * 1.1);
+    sky.sunMat.opacity = Math.max(0, (k - 0.6) / 0.4);
+    sky.sun.position.y = SUN_DIR.y * 440 - 30 + Math.max(0, k - 0.6) * 90;
+    mix3(C(0x10183a), C(0x2c2448), C(0x9b8aa6), k, scene.fog.color);
+    hemi.color.copy(C(0x6f84c4)).lerp(C(0xffd2bd), k);
+    hemi.groundColor.copy(C(0x1c2238)).lerp(C(0x62607e), k);
+    hemi.intensity = 0.9 + k * 0.3;
+    moon.color.copy(C(0xb9caff)).lerp(C(0xffc29a), k);
+    moon.intensity = 1.1 + k * 0.5;
+    tmpCol.copy(SUN_DIR).multiplyScalar(60);
+    lightOffset.set(-40, 60, -30).lerp(new THREE.Vector3(SUN_DIR.x * 70, 35, SUN_DIR.z * 70), k);
+  }
+  setTimeOfDay(0);
 
   const snow = buildSnowfall(scene);
 
@@ -953,9 +1139,19 @@ export function buildWorld(scene) {
     tree,
     colliders,
     worldRadius: 85,
+    pond,
+    forest,
+    setTimeOfDay,
+    skyColors: () => ({ horizon: sky.skyMat.uniforms.uHorizon.value, top: sky.skyMat.uniforms.uTop.value, dawn: sky.skyMat.uniforms.uDawn.value }),
     update(dt, t, center) {
+      // snap to shadow-map texels so shadows don't shimmer as she walks
+      const texel = 84 / 2048;
+      snapped.set(Math.round(center.x / texel) * texel, 0, Math.round(center.z / texel) * texel);
+      moon.target.position.copy(snapped);
+      moon.position.copy(snapped).add(lightOffset);
       snow.update(dt, t, center);
       updateSmoke(cabins, dt, t);
+      forest.update(dt, t);
     },
   };
 }

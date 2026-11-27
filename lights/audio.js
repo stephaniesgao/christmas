@@ -36,6 +36,24 @@ function bell(freq, when = 0, dur = 1.2, vol = 0.18) {
   });
 }
 
+function noise(dur, type, freq, vol, when = 0) {
+  const c = ac();
+  if (!c) return;
+  const t = c.currentTime + when;
+  const buf = c.createBuffer(1, Math.ceil(c.sampleRate * dur), c.sampleRate);
+  const data = buf.getChannelData(0);
+  for (let i = 0; i < data.length; i++) data[i] = (Math.random() * 2 - 1) * (1 - i / data.length);
+  const src = c.createBufferSource();
+  src.buffer = buf;
+  const filter = c.createBiquadFilter();
+  filter.type = type;
+  filter.frequency.value = freq;
+  const g = c.createGain();
+  g.gain.value = vol;
+  src.connect(filter).connect(g).connect(master);
+  src.start(t);
+}
+
 export const sfx = {
   unlock: () => ac(),
   pickup(index) {
@@ -74,6 +92,18 @@ export const sfx = {
   },
   error() {
     bell(220, 0, 0.3, 0.08);
+  },
+  // short filtered noise bursts: snowball thud, ice crack, camera shutter
+  snowThud() {
+    noise(0.18, 'lowpass', 700, 0.22);
+  },
+  crack() {
+    noise(0.12, 'highpass', 2500, 0.18);
+    bell(1320, 0.04, 0.6, 0.08);
+  },
+  shutter() {
+    noise(0.05, 'bandpass', 3000, 0.25);
+    noise(0.06, 'bandpass', 2200, 0.2, 0.09);
   },
 };
 

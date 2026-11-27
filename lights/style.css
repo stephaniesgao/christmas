@@ -304,12 +304,21 @@ h1 {
 .bauble.off span {
   text-decoration: line-through;
 }
+.bauble.green {
+  right: 74px;
+  background: radial-gradient(circle at 35% 30%, #6fbf7f 0 18%, var(--green) 45%, #1b4027 100%);
+}
+.bauble svg {
+  width: 22px;
+  height: 22px;
+  margin-top: 3px;
+}
 
 /* the strand: wire and bulbs drawn right onto the screen, no box */
 .strand-bar {
   position: fixed;
   left: 50%;
-  bottom: 10px;
+  bottom: 34px;
   width: min(560px, calc(100vw - 32px));
   transform: translateX(-50%);
   text-align: center;
@@ -466,6 +475,138 @@ h1 {
   font-size: 18px;
   color: var(--snow);
   text-shadow: 1px 1px 0 rgba(6, 8, 24, 0.8);
+}
+
+/* special bulbs on the HUD strand get a little sparkle mark */
+.bulb .mark {
+  opacity: 0;
+  fill: #fff6c8;
+}
+.bulb.special.lit .mark {
+  opacity: 1;
+  animation: twinkle 1.6s ease-in-out infinite;
+  transform-box: fill-box;
+  transform-origin: center;
+}
+@keyframes twinkle {
+  50% {
+    transform: scale(0.6) rotate(45deg);
+    opacity: 0.6;
+  }
+}
+
+/* villager speech: a paper bubble with a tail, pinned above their head */
+#speech {
+  position: fixed;
+  max-width: 240px;
+  padding: 9px 14px 10px;
+  border-radius: 14px;
+  background: var(--paper);
+  color: var(--ink);
+  font-size: 18px;
+  line-height: 1.2;
+  box-shadow: 3px 4px 0 rgba(6, 8, 24, 0.45);
+  transform: translate(-50%, calc(-100% - 14px)) scale(0.6);
+  transform-origin: 50% 100%;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.2s, transform 0.25s cubic-bezier(0.3, 1.5, 0.5, 1);
+  z-index: 15;
+}
+#speech b {
+  display: block;
+  font-family: var(--display);
+  font-weight: 400;
+  font-size: 15px;
+  color: var(--red);
+  letter-spacing: 0.3px;
+}
+#speech::after {
+  content: '';
+  position: absolute;
+  left: 50%;
+  bottom: -9px;
+  width: 18px;
+  height: 18px;
+  margin-left: -9px;
+  background: var(--paper);
+  transform: rotate(45deg);
+  border-radius: 0 0 4px 0;
+}
+#speech.show {
+  opacity: 1;
+  transform: translate(-50%, calc(-100% - 14px)) scale(1);
+}
+
+/* photo mode */
+#photo-ui {
+  display: none;
+  position: fixed;
+  left: 50%;
+  bottom: 24px;
+  transform: translateX(-50%);
+  text-align: center;
+  z-index: 12;
+}
+.photo-tip {
+  margin: 0 0 12px;
+  font-size: 18px;
+  color: var(--snow);
+  text-shadow: 1.5px 1.5px 0 rgba(6, 8, 24, 0.85);
+}
+.photo-buttons {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 14px;
+}
+.photo-buttons .tag {
+  cursor: pointer;
+}
+body.photo-mode #photo-ui {
+  display: block;
+}
+body.photo-mode #hud,
+body.photo-mode #toast,
+body.photo-mode #speech {
+  display: none;
+}
+/* corner brackets like a camera viewfinder */
+body.photo-mode::after {
+  content: '';
+  position: fixed;
+  inset: 22px;
+  pointer-events: none;
+  background:
+    linear-gradient(var(--snow), var(--snow)) top left / 36px 3px,
+    linear-gradient(var(--snow), var(--snow)) top left / 3px 36px,
+    linear-gradient(var(--snow), var(--snow)) top right / 36px 3px,
+    linear-gradient(var(--snow), var(--snow)) top right / 3px 36px,
+    linear-gradient(var(--snow), var(--snow)) bottom left / 36px 3px,
+    linear-gradient(var(--snow), var(--snow)) bottom left / 3px 36px,
+    linear-gradient(var(--snow), var(--snow)) bottom right / 36px 3px,
+    linear-gradient(var(--snow), var(--snow)) bottom right / 3px 36px;
+  background-repeat: no-repeat;
+  opacity: 0.8;
+}
+#flash {
+  position: fixed;
+  inset: 0;
+  background: #fff;
+  opacity: 0;
+  pointer-events: none;
+  z-index: 30;
+}
+#flash.go {
+  animation: flash 0.5s ease-out;
+}
+@keyframes flash {
+  0% {
+    opacity: 0.85;
+  }
+  100% {
+    opacity: 0;
+  }
 }
 
 @media (max-width: 720px) {

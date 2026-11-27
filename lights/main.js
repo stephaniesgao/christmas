@@ -4,8 +4,11 @@ import { EffectComposer } from 'three/examples/jsm/postprocessing/EffectComposer
 import { RenderPass } from 'three/examples/jsm/postprocessing/RenderPass.js';
 import { UnrealBloomPass } from 'three/examples/jsm/postprocessing/UnrealBloomPass.js';
 import { OutputPass } from 'three/examples/jsm/postprocessing/OutputPass.js';
+import { GTAOPass } from 'three/examples/jsm/postprocessing/GTAOPass.js';
+import { ShaderPass } from 'three/examples/jsm/postprocessing/ShaderPass.js';
 import { buildWorld, CABIN, getGlowTexture } from './world.js';
 import { sfx, setMusic, isMusicOn } from './audio.js';
+import { createVillagers } from './villagers.js';
 
 // ---------- tuning ----------
 const STRAND_SIZE = 8;
@@ -27,14 +30,95 @@ renderer.toneMappingExposure = 1.05;
 const scene = new THREE.Scene();
 const camera = new THREE.PerspectiveCamera(55, window.innerWidth / window.innerHeight, 0.1, 1200);
 
-const composer = new EffectComposer(renderer);
+// ---------- post-processing ----------
+// Multisampled HDR targets (the composer otherwise drops the canvas's anti-aliasing),
+// ambient occlusion for contact shadows, bloom for the lights, then a colour grade.
+const rtSize = new THREE.Vector2();
+renderer.getDrawingBufferSize(rtSize);
+const composer = new EffectComposer(renderer, new THREE.WebGLRenderTarget(rtSize.x, rtSize.y, { samples: 4, type: THREE.HalfFloatType }));
 composer.addPass(new RenderPass(scene, camera));
+const gtao = new GTAOPass(scene, camera, rtSize.x, rtSize.y, undefined, {
+  radius: 1.1,
+  distanceExponent: 1.4,
+  thickness: 1.6,
+  scale: 1.1,
+  samples: 12,
+  distanceFallOff: 1,
+  screenSpaceRadius: false,
+});
+gtao.blendIntensity = 0.85;
+// glows, sprites and see-through things shouldn't cast ambient shadows
+const baseOverride = gtao.overrideVisibility.bind(gtao);
+gtao.overrideVisibility = function () {
+  baseOverride();
+  this.scene.traverse((o) => {
+    if (o.isSprite || (o.material && !Array.isArray(o.material) && (o.material.transparent || o.material.isMeshBasicMaterial))) o.visible = false;
+  });
+};
+composer.addPass(gtao);
 const bloom = new UnrealBloomPass(new THREE.Vector2(window.innerWidth, window.innerHeight), 0.6, 0.5, 0.86);
 composer.addPass(bloom);
 composer.addPass(new OutputPass());
+const grade = new ShaderPass({
+  uniforms: {
+    tDiffuse: { value: null },
+    uTime: { value: 0 },
+    uVignette: { value: 0.38 },
+    uRes: { value: new THREE.Vector2(rtSize.x, rtSize.y) },
+  },
+  vertexShader: 'varying vec2 vUv; void main(){ vUv = uv; gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0); }',
+  fragmentShader: `
+    uniform sampler2D tDiffuse; uniform float uTime; uniform float uVignette; uniform vec2 uRes; varying vec2 vUv;
+    void main() {
+      vec3 c = texture2D(tDiffuse, vUv).rgb;
+      c = mix(c, c * c * (3.0 - 2.0 * c), 0.22);                 // gentle S-curve
+      float l = dot(c, vec3(0.299, 0.587, 0.114));
+      c = mix(vec3(l), c, 1.12);                                  // a touch more colour
+      c += vec3(-0.015, 0.0, 0.03) * (1.0 - l) + vec3(0.03, 0.012, -0.02) * l; // cool shadows, warm highlights
+      vec2 q = (vUv - 0.5) * vec2(uRes.x / uRes.y, 1.0);
+      c *= mix(1.0 - uVignette, 1.0, smoothstep(1.05, 0.3, length(q)));
+      float n = fract(sin(dot(vUv * uRes + uTime * 61.0, vec2(12.9898, 78.233))) * 43758.5453);
+      c += (n - 0.5) * 0.022;                                     // fine film grain
+      gl_FragColor = vec4(clamp(c, 0.0, 1.0), 1.0);
+    }`,
+});
+composer.addPass(grade);
 
 const world = buildWorld(scene);
 const { cabins, tree, colliders } = world;
+
+// image-based lighting: a little blurred copy of the sky (plus warm village glows near
+// the horizon) lights every surface, so materials pick up colour instead of looking flat
+const pmrem = new THREE.PMREMGenerator(renderer);
+const envScene = new THREE.Scene();
+const envSkyMat = new THREE.ShaderMaterial({
+  side: THREE.BackSide,
+  uniforms: { uHorizon: { value: new THREE.Color() }, uTop: { value: new THREE.Color() }, uGround: { value: new THREE.Color(0x2a3050) } },
+  vertexShader: 'varying vec3 vP; void main(){ vP = normalize(position); gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0); }',
+  fragmentShader: `uniform vec3 uHorizon; uniform vec3 uTop; uniform vec3 uGround; varying vec3 vP;
+    void main(){ float h = vP.y; vec3 c = h > 0.0 ? mix(uHorizon, uTop, smoothstep(0.0, 0.7, h)) : mix(uHorizon, uGround, smoothstep(0.0, 0.3, -h)); gl_FragColor = vec4(c * 1.6, 1.0); }`,
+});
+envScene.add(new THREE.Mesh(new THREE.SphereGeometry(10, 32, 16), envSkyMat));
+for (let i = 0; i < 6; i++) {
+  const glow = new THREE.Mesh(new THREE.SphereGeometry(0.9, 12, 8), new THREE.MeshBasicMaterial({ color: new THREE.Color(1.4, 0.8, 0.35) }));
+  const a = (i / 6) * Math.PI * 2;
+  glow.position.set(Math.cos(a) * 8, 0.6, Math.sin(a) * 8);
+  envScene.add(glow);
+}
+let envTarget = null;
+let envK = -1;
+function refreshEnvironment(k) {
+  if (Math.abs(k - envK) < 0.06) return;
+  envK = k;
+  const { horizon, top } = world.skyColors();
+  envSkyMat.uniforms.uHorizon.value.copy(horizon);
+  envSkyMat.uniforms.uTop.value.copy(top);
+  envSkyMat.uniforms.uGround.value.set(0x2a3050).lerp(new THREE.Color(0xb7b2c8), k);
+  if (envTarget) envTarget.dispose();
+  envTarget = pmrem.fromScene(envScene, 0.04);
+  scene.environment = envTarget.texture;
+}
+refreshEnvironment(0);
 
 // ---------- UI refs ----------
 const $ = (id) => document.getElementById(id);
@@ -54,6 +138,11 @@ const ui = {
   finale: $('finale'),
   finaleClose: $('finale-close'),
   loading: $('loading'),
+  photoBtn: $('photo-toggle'),
+  snap: $('snap'),
+  photoDone: $('photo-done'),
+  hideSteph: $('hide-steph'),
+  flash: $('flash'),
 };
 
 // ---- HUD drawings ----
@@ -83,6 +172,7 @@ const strandBulbs = [];
     svgEl('ellipse', { class: 'shine', cx: -3, cy: 18, rx: 1.8, ry: 5 }, g);
     svgEl('rect', { class: 'cap', x: -5.5, y: 0, width: 11, height: 10, rx: 2 }, g);
     svgEl('path', { class: 'cap-line', d: 'M -5.5 4 H 5.5 M -5.5 7 H 5.5' }, g);
+    svgEl('path', { class: 'mark', d: 'M 9 12 l 1.6 3.4 3.4 1.6 -3.4 1.6 -1.6 3.4 -1.6 -3.4 -3.4 -1.6 3.4 -1.6 z' }, g);
     strandBulbs.push(g);
   }
 }
@@ -113,6 +203,10 @@ function toast(msg) {
 
 // ---------- game state ----------
 const state = {
+  types: [], // parallel to strand: null, 'glitter' or 'snow'
+  timeK: 0,
+  photo: false,
+  snapRequested: false,
   playing: false,
   strand: [], // colors collected
   firstHook: null, // { cabin, hook }
@@ -236,7 +330,27 @@ function animateRig(dt, t) {
   rig.armR.rotation.x = throwing ? throwArmAngle(throwAnim.t) : swing;
   rig.armR.rotation.z = throwing ? -0.45 * Math.sin(Math.min(1, throwAnim.t / 0.85) * Math.PI) : -0.1;
   if (throwing) rig.chest.rotation.y += (throwAnim.t < RELEASE ? -0.35 : 0.25) * Math.sin(Math.min(1, throwAnim.t / 0.85) * Math.PI);
+  // skating: long sideways pushes, free arm out for balance, leaning forward
+  skateBlend += ((state.skating ? 1 : 0) - skateBlend) * (1 - Math.exp(-dt * 6));
+  if (skateBlend > 0.01) {
+    const k = skateBlend;
+    const push = Math.sin(walkPhase);
+    rig.legL.rotation.x *= 1 - k;
+    rig.legR.rotation.x *= 1 - k;
+    rig.legL.rotation.z = k * Math.max(0, push) * 0.45 * A;
+    rig.legR.rotation.z = -k * Math.max(0, -push) * 0.45 * A;
+    rig.hips.rotation.z = k * push * 0.08 * A;
+    rig.chest.rotation.x += k * 0.18;
+    if (!throwing) {
+      rig.armR.rotation.x = THREE.MathUtils.lerp(rig.armR.rotation.x, -0.2, k);
+      rig.armR.rotation.z = THREE.MathUtils.lerp(rig.armR.rotation.z, -1.1 + push * 0.15, k);
+    }
+  } else {
+    rig.legL.rotation.z = 0;
+    rig.legR.rotation.z = 0;
+  }
 }
+let skateBlend = 0;
 
 function throwHandPosition() {
   if (rig) return rig.handR.getWorldPosition(new THREE.Vector3());
@@ -277,6 +391,7 @@ new GLTFLoader().load(
       mat.emissive = new THREE.Color(0xffffff);
       mat.emissiveMap = mat.map;
       mat.emissiveIntensity = 0.45;
+      stephMat = mat;
       mat.needsUpdate = true;
     });
     rig = rigModel(stephMesh);
@@ -293,6 +408,7 @@ new GLTFLoader().load(
 );
 
 // warm lantern glow that follows the player so she's visible at night
+let stephMat = null;
 const lantern = new THREE.PointLight(0xffd6a0, 5, 16, 1.4);
 lantern.position.set(0, 3.2, 0.6);
 player.add(lantern);
@@ -307,23 +423,36 @@ let walkAmt = 0;
 const orbit = { yaw: Math.PI, pitch: 0.42, dist: 15 };
 const camTarget = new THREE.Vector3();
 
-// is this point inside a tree's branches or a cabin? (obstacles Steph herself is
-// standing inside the margin of are ignored, so the camera doesn't snap in beside them)
+// is this point inside a tree's branches or a cabin? Cabins use their real shape (walls,
+// overhanging roof, chimney) so the camera never ends up inside one.
 const camProbe = new THREE.Vector3();
 const camLocal = new THREE.Vector3();
+const ROOF_HALF = CABIN.W / 2 + CABIN.OVER;
+function insideCabin(cab, p, pad) {
+  camLocal.copy(p);
+  cab.group.worldToLocal(camLocal);
+  const ax = Math.abs(camLocal.x);
+  const az = Math.abs(camLocal.z);
+  const y = camLocal.y;
+  // log walls (plus the door step and awning out front)
+  if (ax < CABIN.W / 2 + 0.45 + pad && az < CABIN.D / 2 + 0.45 + pad && y < CABIN.H + 0.2) return true;
+  // the roof slab and its snow, leaving the open space under the eaves free
+  if (ax < ROOF_HALF + pad && az < CABIN.D / 2 + CABIN.OVER + pad) {
+    const roofLine = CABIN.H + CABIN.RISE * (1 - Math.min(ax, ROOF_HALF) / ROOF_HALF);
+    if (y > roofLine - 0.45 - pad && y < roofLine + 0.95 + pad) return true;
+    if (ax < CABIN.W / 2 + 0.45 + pad && y < roofLine) return true; // attic
+  }
+  // chimney
+  return Math.abs(camLocal.x - CABIN.W / 4) < 1 + pad && Math.abs(camLocal.z + CABIN.D / 4) < 1 + pad && y < CABIN.H + CABIN.RISE + 2.4;
+}
 function cameraBlocked(p, from) {
   for (const c of colliders) {
-    const r = c.br + 0.4;
+    // stop at a tree's dense core; brushing through the outer needles is fine and
+    // keeps the camera from getting squeezed against Steph in the woods
+    const r = c.br * 0.65 + 0.3;
     if (p.y < c.top && Math.hypot(p.x - c.x, p.z - c.z) < r && Math.hypot(from.x - c.x, from.z - c.z) >= r) return true;
   }
-  for (const cab of cabins) {
-    const inBox = (v) => {
-      camLocal.copy(v);
-      cab.group.worldToLocal(camLocal);
-      return Math.abs(camLocal.x) < CABIN.W / 2 + 1.2 && Math.abs(camLocal.z) < CABIN.D / 2 + 1.2 && camLocal.y < CABIN.H + CABIN.RISE + 1;
-    };
-    if (inBox(p) && !inBox(from)) return true;
-  }
+  for (const cab of cabins) if (insideCabin(cab, p, 0.15)) return true;
   return false;
 }
 
@@ -335,14 +464,17 @@ function updateCamera(dt) {
   const dir = new THREE.Vector3(Math.sin(orbit.yaw) * cp, Math.sin(orbit.pitch), Math.cos(orbit.yaw) * cp);
   // pull the camera in front of anything between it and Steph
   let allowed = orbit.dist;
-  for (let i = 1; i <= 16; i++) {
-    const d = 3 + ((orbit.dist - 3) * i) / 16;
+  const STEPS = 28;
+  for (let i = 0; i <= STEPS; i++) {
+    const d = 0.3 + ((orbit.dist - 0.3) * i) / STEPS;
     camProbe.copy(camTarget).addScaledVector(dir, d);
     if (cameraBlocked(camProbe, camTarget)) {
-      allowed = Math.max(3, d - (orbit.dist - 3) / 16);
+      allowed = Math.max(0.3, d - (orbit.dist - 0.3) / STEPS - 0.2);
       break;
     }
   }
+  // if the camera is squeezed right up against her, hide her rather than show the inside of her head
+  body.visible = camDist > 1.6;
   camDist = allowed < camDist ? allowed : camDist + (allowed - camDist) * (1 - Math.exp(-dt * 3));
   camera.position.copy(camTarget).addScaledVector(dir, camDist);
   if (camera.position.y < 0.6) camera.position.y = 0.6;
@@ -366,8 +498,9 @@ function resolveCollisions(p) {
   for (const cab of cabins) {
     tmp.copy(p);
     cab.group.worldToLocal(tmp);
-    const hw = CABIN.W / 2 + pr;
-    const hd = CABIN.D / 2 + pr;
+    // a bit wider than the roof overhang so the camera's cabin check never contains her
+    const hw = CABIN.W / 2 + CABIN.OVER + 0.3;
+    const hd = CABIN.D / 2 + CABIN.OVER + 0.3;
     if (Math.abs(tmp.x) < hw && Math.abs(tmp.z) < hd) {
       const px = hw - Math.abs(tmp.x);
       const pz = hd - Math.abs(tmp.z);
@@ -391,11 +524,17 @@ function updatePlayer(dt) {
   const wish = new THREE.Vector3()
     .addScaledVector(fwd, move.f - move.b)
     .addScaledVector(right, move.r - move.l);
-  const moving = wish.lengthSq() > 0 && state.playing;
-  const speed = move.sprint ? 15 : 9;
+  const moving = wish.lengthSq() > 0 && state.playing && !state.photo;
+  const pond = world.pond;
+  state.skating = Math.hypot(player.position.x - pond.center.x, player.position.z - pond.center.z) < pond.radius - 0.4;
+  const speed = state.skating ? 12 : move.sprint ? 15 : 9;
   if (moving) wish.normalize().multiplyScalar(speed);
   else wish.set(0, 0, 0);
-  vel.lerp(wish, 1 - Math.exp(-dt * 10));
+  // on ice she glides: speed builds slowly and carries on after you let go
+  vel.lerp(wish, 1 - Math.exp(-dt * (state.skating ? 1.4 : 10)));
+  if (state.skating && Math.hypot(vel.x, vel.z) > 5 && Math.random() < dt * 14) {
+    burst(player.position.clone().add(new THREE.Vector3(0, 0.15, 0)), iceSpray, 2, 1.6);
+  }
   player.position.addScaledVector(vel, dt);
 
   vy -= 30 * dt;
@@ -417,13 +556,15 @@ function updatePlayer(dt) {
   // walk cycle: bones are posed in animateRig; the whole body gets a little bounce
   const amtTarget = player.position.y > 0.01 ? 0 : Math.min(sp / 9, 1);
   walkAmt += (amtTarget - walkAmt) * (1 - Math.exp(-dt * 10));
-  walkPhase += dt * Math.max(sp, 0.001) * 1.15;
+  walkPhase += dt * Math.max(sp, 0.001) * (state.skating ? 0.45 : 1.15);
   if (walkAmt < 0.02) walkPhase += (Math.round(walkPhase / Math.PI) * Math.PI - walkPhase) * (1 - Math.exp(-dt * 8));
   body.position.y = Math.abs(Math.sin(walkPhase)) * 0.1 * walkAmt;
   body.rotation.x = 0.04 * walkAmt;
 }
 
 // where the wire leaves her hand (the top of the coil, where she grips it)
+const iceSpray = new THREE.Color(0.85, 0.93, 1);
+
 function handPosition() {
   return coil.localToWorld(new THREE.Vector3(0, 0, 0));
 }
@@ -435,7 +576,57 @@ const capGeo = new THREE.CylinderGeometry(0.12, 0.14, 0.18, 8);
 const capMat = new THREE.MeshStandardMaterial({ color: 0x3a6b4a, metalness: 0.4, roughness: 0.5 });
 const groundBulbs = [];
 
-function makeBulbMesh(colorHex, scale = 1) {
+// sparkly icons that float around special bulbs
+function iconTexture(draw) {
+  const c = document.createElement('canvas');
+  c.width = c.height = 64;
+  const g = c.getContext('2d');
+  g.translate(32, 32);
+  draw(g);
+  return new THREE.CanvasTexture(c);
+}
+const SPECIALS = {
+  glitter: {
+    color: '#ffd45e',
+    label: 'glitter',
+    tex: iconTexture((g) => {
+      g.fillStyle = '#fff6c8';
+      for (const [x, y, r] of [[0, 0, 18], [-17, -14, 7], [16, 15, 8], [18, -16, 5]]) {
+        g.beginPath();
+        for (let i = 0; i < 8; i++) {
+          const a = (i / 8) * Math.PI * 2;
+          const rr = i % 2 ? r * 0.28 : r;
+          g.lineTo(x + Math.cos(a) * rr, y + Math.sin(a) * rr);
+        }
+        g.fill();
+      }
+    }),
+  },
+  snow: {
+    color: '#bfe9ff',
+    label: 'snowflake',
+    tex: iconTexture((g) => {
+      g.strokeStyle = '#f2fbff';
+      g.lineWidth = 3.5;
+      g.lineCap = 'round';
+      for (let i = 0; i < 6; i++) {
+        g.save();
+        g.rotate((i / 6) * Math.PI * 2);
+        g.beginPath();
+        g.moveTo(0, 0);
+        g.lineTo(0, -24);
+        g.moveTo(0, -13);
+        g.lineTo(-7, -19);
+        g.moveTo(0, -13);
+        g.lineTo(7, -19);
+        g.stroke();
+        g.restore();
+      }
+    }),
+  },
+};
+
+function makeBulbMesh(colorHex, scale = 1, type = null) {
   const g = new THREE.Group();
   const color = new THREE.Color(colorHex);
   const mat = new THREE.MeshBasicMaterial({ color: color.clone().multiplyScalar(2.2) });
@@ -447,8 +638,14 @@ function makeBulbMesh(colorHex, scale = 1) {
   );
   glow.scale.setScalar(1.6);
   g.add(bulb, cap, glow);
+  let icon = null;
+  if (type) {
+    icon = new THREE.Sprite(new THREE.SpriteMaterial({ map: SPECIALS[type].tex, transparent: true, depthWrite: false, blending: THREE.AdditiveBlending, opacity: 0.95 }));
+    icon.scale.setScalar(1.3);
+    g.add(icon);
+  }
   g.scale.setScalar(scale);
-  g.userData = { color, mat, glow };
+  g.userData = { color, mat, glow, type, icon };
   return g;
 }
 
@@ -554,8 +751,8 @@ function updateCoil(dt, t) {
     const bounce = 1 + Math.sin(slot.pop * Math.PI) * 0.6;
     slot.bulb.scale.setScalar(show ? 0.45 * slot.pop * bounce : 0.0001);
     const ud = slot.bulb.userData;
-    ud.mat.color.copy(ud.color).multiplyScalar(1.7 + 0.1 * Math.sin(t * 1.5 + i));
-    ud.glow.material.opacity = 0.22;
+    ud.mat.color.copy(ud.color).multiplyScalar((1.7 + 0.1 * Math.sin(t * 1.5 + i)) * night);
+    ud.glow.material.opacity = 0.22 * night;
   });
 }
 
@@ -577,16 +774,22 @@ function randomSpawn(near) {
     if (Math.hypot(x, z) > world.worldRadius - 4 || Math.hypot(x, z) < 9) continue;
     if (cabins.some((c) => Math.hypot(c.group.position.x - x, c.group.position.z - z) < 8.5)) continue;
     if (colliders.some((c) => Math.hypot(c.x - x, c.z - z) < c.r + 1)) continue;
+    if (Math.hypot(world.pond.center.x - x, world.pond.center.z - z) < world.pond.radius + 2) continue;
     return new THREE.Vector3(x, 0, z);
   }
   return new THREE.Vector3(0, 0, 12);
 }
 
-function spawnGroundBulb(pos, colorHex) {
-  const color = colorHex || PALETTE[Math.floor(Math.random() * PALETTE.length)];
-  const mesh = makeBulbMesh(color);
+function rollType() {
+  const r = Math.random();
+  return r < 0.06 ? 'glitter' : r < 0.12 ? 'snow' : null;
+}
+function spawnGroundBulb(pos, colorHex, type = rollType(), fallFrom = 0) {
+  const color = type ? SPECIALS[type].color : colorHex || PALETTE[Math.floor(Math.random() * PALETTE.length)];
+  const mesh = makeBulbMesh(color, 1, type);
   mesh.position.copy(pos || randomSpawn(player.position));
   mesh.userData.hex = color;
+  mesh.userData.fall = fallFrom; // height it's dropping from (bulbs shaken out of trees)
   mesh.userData.phase = Math.random() * 6.28;
   mesh.userData.baseY = 0.7;
   mesh.userData.spawn = 0;
@@ -620,34 +823,220 @@ function updateGroundBulbs(dt, t) {
       state.fullWarned = true;
       toast('Your strand is full. Hang it on a cabin!');
     }
-    b.position.y = ud.baseY + Math.sin(t * 2 + ud.phase) * 0.18;
-    ud.glow.material.opacity = 0.42 + Math.sin(t * 1.5 + ud.phase) * 0.05;
+    if (ud.fall > 0) {
+      ud.fall = Math.max(0, ud.fall - dt * 9);
+      b.position.y = ud.baseY + ud.fall;
+    } else {
+      b.position.y = ud.baseY + Math.sin(t * 2 + ud.phase) * 0.18;
+    }
+    ud.glow.material.opacity = (0.42 + Math.sin(t * 1.5 + ud.phase) * 0.05) * night;
+    ud.mat.color.copy(ud.color).multiplyScalar(2.2 * night);
+    if (ud.icon) {
+      ud.icon.material.rotation = t * (ud.type === 'snow' ? 0.6 : -1.2);
+      ud.icon.material.opacity = 0.7 + Math.sin(t * 4 + ud.phase) * 0.25;
+      if (Math.random() < dt * 3) burst(b.position, ud.color, 1, 1.2);
+    }
   }
 }
 
 function collectBulb(b, i) {
   scene.remove(b);
   groundBulbs.splice(i, 1);
-  state.strand.push(b.userData.hex);
+  addToStrand(b.userData.hex, b.userData.type, b.userData.color);
+  // keep the snow stocked
+  setTimeout(() => spawnGroundBulb(), 900 + Math.random() * 1500);
+}
+
+function addToStrand(hex, type, color) {
+  state.strand.push(hex);
+  state.types.push(type || null);
+  if (type) toast(type === 'glitter' ? 'A glitter bulb! This strand will sparkle.' : 'A snowflake bulb! The lights will chase along this strand.');
   sfx.pickup(state.strand.length - 1);
-  burst(coilSlots[state.strand.length - 1].bulb.getWorldPosition(new THREE.Vector3()), b.userData.color, 10, 2);
+  burst(coilSlots[state.strand.length - 1].bulb.getWorldPosition(new THREE.Vector3()), color, 10, 2);
   updateStrandUI();
   if (state.strand.length === STRAND_SIZE) {
     toast('Strand full! Walk up to a cabin and click a glowing hook.');
     state.fullWarned = false;
   }
-  // keep the snow stocked
-  setTimeout(() => spawnGroundBulb(), 900 + Math.random() * 1500);
 }
 
 function dropBulb() {
   if (!state.strand.length || live) return;
   const hex = state.strand.pop();
+  const type = state.types.pop();
   const fwd = new THREE.Vector3(Math.sin(player.rotation.y), 0, Math.cos(player.rotation.y));
   const pos = player.position.clone().addScaledVector(fwd, 5.5);
   pos.y = 0;
-  spawnGroundBulb(pos, hex);
+  spawnGroundBulb(pos, hex, type);
   updateStrandUI();
+}
+
+// ---------- bulbs frozen in the pond ----------
+const iceBulbs = [];
+function freezeBulb() {
+  const { center, radius } = world.pond;
+  for (let tries = 0; tries < 30; tries++) {
+    const a = Math.random() * Math.PI * 2;
+    const d = Math.sqrt(Math.random()) * (radius - 1.5);
+    const pos = new THREE.Vector3(center.x + Math.cos(a) * d, -0.08, center.z + Math.sin(a) * d);
+    if (iceBulbs.some((b) => b.position.distanceTo(pos) < 2)) continue;
+    const b = makeBulbMesh(SPECIALS.snow.color, 0.9, 'snow');
+    b.position.copy(pos);
+    b.rotation.set(Math.PI / 2 - 0.3, 0, Math.random() * 6.28); // lying in the ice
+    b.userData.glow.material.opacity = 0.5;
+    scene.add(b);
+    iceBulbs.push(b);
+    return;
+  }
+}
+for (let i = 0; i < 6; i++) freezeBulb();
+let nextFreeze = 0;
+function updateIceBulbs(dt, t) {
+  const full = state.strand.length >= STRAND_SIZE;
+  for (let i = iceBulbs.length - 1; i >= 0; i--) {
+    const b = iceBulbs[i];
+    const ud = b.userData;
+    if (ud.icon) ud.icon.material.rotation = t * 0.5;
+    ud.mat.color.copy(ud.color).multiplyScalar((1.4 + Math.sin(t * 2 + i) * 0.3) * night);
+    if (!state.playing || full) continue;
+    if (Math.hypot(b.position.x - player.position.x, b.position.z - player.position.z) < 1.4) {
+      // skate over it and it pops out of the ice
+      scene.remove(b);
+      iceBulbs.splice(i, 1);
+      burst(b.position.clone().setY(0.2), iceSpray, 24, 3.2);
+      sfx.crack();
+      addToStrand(SPECIALS.snow.color, 'snow', ud.color);
+    }
+  }
+  // the pond slowly freezes new ones in
+  if (iceBulbs.length < 6 && t > nextFreeze) {
+    nextFreeze = t + 35;
+    freezeBulb();
+  }
+}
+
+// ---------- snowballs ----------
+const snowballGeo = new THREE.SphereGeometry(0.24, 12, 10);
+const snowballMat = new THREE.MeshStandardMaterial({ color: 0xf6f9ff, roughness: 0.9 });
+const snowballs = [];
+const snowWhite = new THREE.Color(0.95, 0.97, 1);
+let snowballReady = 0;
+let pendingSnowball = null;
+function throwSnowball(t) {
+  if (!state.playing || state.photo || t < snowballReady || (live && live.phase !== 'dangling')) return;
+  snowballReady = t + 0.45;
+  // throw where the camera is looking
+  const dir = new THREE.Vector3(-Math.sin(orbit.yaw), 0, -Math.cos(orbit.yaw));
+  state.faceTarget = player.position.clone().addScaledVector(dir, 10);
+  player.rotation.y = Math.atan2(dir.x, dir.z);
+  throwAnim.t = 0;
+  pendingSnowball = { at: t + RELEASE, dir };
+  sfx.throw();
+}
+function updateSnowballs(dt, t) {
+  if (pendingSnowball && t >= pendingSnowball.at) {
+    const m = new THREE.Mesh(snowballGeo, snowballMat);
+    m.castShadow = true;
+    m.position.copy(throwHandPosition());
+    scene.add(m);
+    snowballs.push({ m, v: pendingSnowball.dir.clone().multiplyScalar(24).add(new THREE.Vector3(0, 7, 0)), life: 3 });
+    pendingSnowball = null;
+    if (!live) state.faceTarget = null;
+  }
+  for (let i = snowballs.length - 1; i >= 0; i--) {
+    const sb = snowballs[i];
+    sb.v.y -= 20 * dt;
+    sb.m.position.addScaledVector(sb.v, dt);
+    sb.life -= dt;
+    const p = sb.m.position;
+    let hit = sb.life <= 0 || p.y < 0.15;
+    // trees: shake the snow off, and sometimes a hidden bulb tumbles out
+    for (const tree of world.forest.trees) {
+      if (hit) break;
+      if (p.y < 7.5 * tree.s && Math.hypot(p.x - tree.x, p.z - tree.z) < 2.2 * tree.sx) {
+        hit = true;
+        world.forest.shake(tree);
+        sfx.snowThud();
+        for (let k = 0; k < 6; k++) burst(new THREE.Vector3(tree.x + (Math.random() - 0.5) * 3 * tree.sx, (2 + Math.random() * 5) * tree.s, tree.z + (Math.random() - 0.5) * 3 * tree.sx), snowWhite, 10, 2.2);
+        if (tree.hasBulb) {
+          tree.hasBulb = false;
+          const toward = new THREE.Vector3(player.position.x - tree.x, 0, player.position.z - tree.z).normalize();
+          const drop = new THREE.Vector3(tree.x, 0, tree.z).addScaledVector(toward, 2.6 * tree.sx + 0.8);
+          const type = Math.random() < 0.5 ? 'glitter' : 'snow';
+          spawnGroundBulb(drop, null, type, 4.5 * tree.s);
+          setTimeout(() => toast(`Something fell out of the tree: a ${SPECIALS[type].label} bulb!`), 350);
+        }
+      }
+    }
+    // villagers
+    for (const v of villagers.list) {
+      if (hit || v.state !== 'porch') continue;
+      if (p.distanceTo(v.world) < 1.4 || (Math.hypot(p.x - v.world.x, p.z - v.world.z) < 1 && p.y < 3)) {
+        hit = true;
+        villagers.react(v, t);
+        sfx.snowThud();
+      }
+    }
+    // cabins
+    if (!hit) for (const cab of cabins) if (insideCabin(cab, p, 0)) hit = true;
+    if (hit) {
+      burst(p, snowWhite, 18, 3);
+      scene.remove(sb.m);
+      snowballs.splice(i, 1);
+    }
+  }
+}
+
+// ---------- villagers ----------
+const villagers = createVillagers(scene, cabins, CABIN, colliders);
+
+// ---------- night slowly turning to morning ----------
+// 1 at night, easing down to ~0.45 by sunrise: night-time glows fade in daylight
+let night = 1;
+function updateTimeOfDay(dt) {
+  const done = cabins.filter((c) => c.complete).length;
+  const target = (done / cabins.length) * 0.8 + (tree.lit ? 0.2 : 0);
+  state.timeK += (target - state.timeK) * (1 - Math.exp(-dt * 0.35));
+  world.setTimeOfDay(state.timeK);
+  refreshEnvironment(state.timeK);
+  renderer.toneMappingExposure = 1.05 - state.timeK * 0.08;
+  const day = THREE.MathUtils.smoothstep(state.timeK, 0.35, 1);
+  night = 1 - day * 0.55;
+  if (stephMat) stephMat.emissiveIntensity = 0.45 * (1 - day * 0.85);
+  lantern.intensity = 5 * (1 - day * 0.9);
+  bloom.strength = 0.6 * (1 - day * 0.6);
+  bloom.threshold = 0.86 + day * 0.1;
+}
+
+// ---------- photo mode ----------
+let photoCount = 0;
+function setPhotoMode(on) {
+  if (!state.playing) return;
+  state.photo = on;
+  document.body.classList.toggle('photo-mode', on);
+  if (on) {
+    cancelLive();
+    orbit.prevDist = orbit.dist;
+  } else {
+    body.visible = true;
+    if (orbit.prevDist) orbit.dist = orbit.prevDist;
+  }
+}
+function takePhoto() {
+  state.snapRequested = true;
+}
+function savePhoto() {
+  state.snapRequested = false;
+  const url = canvas.toDataURL('image/png');
+  const a = document.createElement('a');
+  photoCount += 1;
+  a.href = url;
+  a.download = `havenfall-${photoCount}.png`;
+  a.click();
+  sfx.shutter();
+  ui.flash.classList.remove('go');
+  void ui.flash.offsetWidth;
+  ui.flash.classList.add('go');
 }
 
 // ---------- hooks ----------
@@ -751,7 +1140,7 @@ function placeBulbsOnCurve(bulbs, curve) {
   });
 }
 
-function hangStrand(cabin, h1, h2, colors) {
+function hangStrand(cabin, h1, h2, colors, types = []) {
   const curve = new SagCurve(h1.world.clone(), h2.world.clone(), sagFor(h1.world, h2.world));
   const group = new THREE.Group();
   const wire = new THREE.Mesh(new THREE.TubeGeometry(curve, 40, 0.04, 5, false), wireMat);
@@ -759,7 +1148,7 @@ function hangStrand(cabin, h1, h2, colors) {
   const count = bulbCountFor(h1.world, h2.world, colors);
   const bulbs = [];
   for (let i = 0; i < count; i++) {
-    const b = makeBulbMesh(colors[i % colors.length], 0.85);
+    const b = makeBulbMesh(colors[i % colors.length], 0.85, types[i % colors.length] || null);
     b.userData.glow.scale.setScalar(1.3);
     b.userData.phase = Math.random() * 6.28;
     b.userData.delay = i * 0.05;
@@ -768,14 +1157,22 @@ function hangStrand(cabin, h1, h2, colors) {
   }
   placeBulbsOnCurve(bulbs, curve);
   scene.add(group);
-  strands.push({ group, bulbs, born: clock.elapsedTime, cabin });
+  const glitter = types.includes('glitter');
+  const chase = types.includes('snow');
+  strands.push({ group, bulbs, born: clock.elapsedTime, cabin, curve, wave: count * 0.05, glitter, chase });
+  if (glitter || chase) setTimeout(() => toast(glitter && chase ? 'Glitter and snowflake bulbs: this one sparkles AND chases!' : glitter ? 'This strand sparkles!' : 'Look, the lights chase along this strand!'), 1400);
 
   state.usedPairs.add(pairKey(h1, h2));
   cabin.strands += 1;
+  cabin.pulseAt = clock.elapsedTime;
+  cabin.pulseStrength = 1;
   if (!cabin.complete && cabin.strands >= STRANDS_PER_CABIN) {
     cabin.complete = true;
     cabin.completedAt = clock.elapsedTime;
     cabin.wreath.visible = true;
+    cabin.pulseStrength = 2.2;
+    goldenShower(cabin);
+    villagers.appear(cabin, clock.elapsedTime + 1.2);
     sfx.cabinDone();
     toast(`✨ ${cabin.name} is glowing!`);
     fireworks(cabin.group.position.clone().add(new THREE.Vector3(0, 10, 0)), 2);
@@ -788,22 +1185,59 @@ function hangStrand(cabin, h1, h2, colors) {
   if (cabins.every((c) => c.complete) && !tree.lit) lightTheTree();
 }
 
+const sparkGold = new THREE.Color(1, 0.86, 0.55);
 function updateStrands(t) {
   for (const s of strands) {
     const age = t - s.born;
+    // a spark runs along the wire just ahead of the light-up wave
+    const front = age / s.wave;
+    if (front <= 1.05) {
+      const p = s.curve.getPoint(Math.min(1, front));
+      burst(p, sparkGold, 3, 1.8);
+    }
     for (const b of s.bulbs) {
       const ud = b.userData;
-      // light-up wave runs down the strand once it's hung, then a soft, slow shimmer
-      const k = THREE.MathUtils.clamp((age - ud.delay) / 0.3, 0, 1);
+      const since = age - ud.delay;
+      const k = THREE.MathUtils.clamp(since / 0.3, 0, 1);
       if (k > 0 && !ud.sparked) {
         ud.sparked = true;
-        burst(b.position, ud.color, 3, 2);
+        burst(b.position, ud.color, 7, 2.6);
       }
-      const tw = 0.93 + 0.07 * Math.sin(t * 1.4 + ud.phase);
+      // a one-time pop and flare as each bulb switches on, then a soft shimmer
+      const flare = since > 0 ? Math.exp(-since * 3.5) : 0;
+      const pop = since > 0 && since < 0.3 ? Math.sin((since / 0.3) * Math.PI) * 0.45 : 0;
+      b.scale.setScalar(0.85 * (1 + pop));
+      let tw = 0.93 + 0.07 * Math.sin(t * 1.4 + ud.phase);
+      // snowflake bulbs: a soft pulse travels down the strand
+      if (s.chase && k >= 1) tw *= 0.55 + 0.75 * Math.pow(Math.max(0, Math.sin(t * 4 - s.bulbs.indexOf(b) * 0.7)), 2);
+      // glitter bulbs: random bulbs catch a glint
+      if (s.glitter && k >= 1 && Math.random() < 0.012) {
+        ud.glint = 1;
+        burst(b.position, sparkGold, 3, 1.4);
+      }
+      ud.glint = Math.max(0, (ud.glint || 0) - 0.06);
       const level = 0.75 + k * 0.45;
-      ud.mat.color.copy(ud.color).multiplyScalar(1.9 * level * tw);
-      ud.glow.material.opacity = (0.25 + 0.2 * k) * tw;
+      const boost = flare * 1.3 + ud.glint * 1.1;
+      ud.mat.color.copy(ud.color).multiplyScalar(1.9 * level * tw * (1 + boost) * night);
+      ud.glow.material.opacity = Math.min(1, (0.25 + 0.2 * k) * tw + 0.65 * flare + 0.4 * ud.glint) * night;
+      ud.glow.scale.setScalar(1.3 + 1.4 * flare + 0.8 * ud.glint);
+      if (ud.icon) ud.icon.material.rotation = t * 0.8;
     }
+  }
+}
+
+// finishing a cabin: golden sparkles burst up around the roofline, a few at a time
+function goldenShower(cabin) {
+  const t0 = clock.elapsedTime;
+  for (let i = 0; i < 14; i++) {
+    const hook = cabin.hooks[Math.floor(Math.random() * cabin.hooks.length)];
+    pendingFireworks.push({
+      at: t0 + 0.15 + i * 0.09,
+      pos: hook.world.clone().add(new THREE.Vector3(0, 0.5, 0)),
+      color: i % 3 ? sparkGold : new THREE.Color(PALETTE[i % PALETTE.length]),
+      n: 22,
+      speed: 4,
+    });
   }
 }
 
@@ -811,10 +1245,14 @@ function updateCabinGlow(dt, t) {
   for (const c of cabins) {
     const level = Math.min(1, c.strands / STRANDS_PER_CABIN);
     const flicker = 0.97 + Math.sin(t * 2.1 + c.index) * 0.015 + Math.sin(t * 3.3 + c.index * 2) * 0.015;
-    const targetWin = 0.05 + level * 2.4 * flicker;
+    // a warm swell right after each strand goes up, easing back to the steady glow
+    const swell = c.pulseAt !== undefined ? Math.exp(-(t - c.pulseAt) * 1.6) * c.pulseStrength : 0;
+    const targetWin = (0.05 + level * 2.4 * flicker + swell * 2.2) * night;
     c.windowMat.emissiveIntensity += (targetWin - c.windowMat.emissiveIntensity) * (1 - Math.exp(-dt * 3));
-    const targetLight = (c.strands > 0 ? 6 + Math.min(c.strands, 4) * 9 : 0) * flicker;
+    const targetLight = ((c.strands > 0 ? 6 + Math.min(c.strands, 4) * 9 : 0) * flicker + swell * 35) * night;
     c.light.intensity += (targetLight - c.light.intensity) * (1 - Math.exp(-dt * 3));
+    const haloTarget = Math.min(0.6, level * 0.45 * flicker + swell * 0.25) * night * night;
+    for (const halo of c.windowGlows) halo.material.opacity += (haloTarget - halo.material.opacity) * (1 - Math.exp(-dt * 3));
     if (c.wreath.visible) {
       const k = Math.min(1, (t - c.completedAt) / 0.6);
       c.wreath.scale.setScalar(Math.max(0.001, k * (1 + Math.sin(k * Math.PI) * 0.3)));
@@ -851,7 +1289,7 @@ function setLiveBulbs(n) {
 function startThrowA(cabin, hook) {
   const group = new THREE.Group();
   scene.add(group);
-  live = { cabin, hookA: hook, hookB: null, colors: [...state.strand], phase: 'throwA', t: 0, from: throwHandPosition(), group, wire: null, bulbs: [], sag: 0.5 };
+  live = { cabin, hookA: hook, hookB: null, colors: [...state.strand], types: [...state.types], phase: 'throwA', t: 0, from: throwHandPosition(), group, wire: null, bulbs: [], sag: 0.5 };
   throwAnim.t = 0;
   state.faceTarget = hook.world;
   setLiveBulbs(live.colors.length);
@@ -931,10 +1369,11 @@ function updateLive(dt) {
     const s = live.t;
     live.sag = sagFor(a, b) * (1 + 0.7 * Math.exp(-s * 5) * Math.cos(s * 17));
     if (s >= SETTLE_TIME) {
-      const { cabin, hookA, hookB, colors } = live;
+      const { cabin, hookA, hookB, colors, types } = live;
       cancelLive();
       state.strand = [];
-      hangStrand(cabin, hookA, hookB, colors);
+      state.types = [];
+      hangStrand(cabin, hookA, hookB, colors, types);
       updateStrandUI();
       return;
     }
@@ -980,7 +1419,7 @@ function updatePreview() {
 }
 
 // ---------- sparkle particles ----------
-const SPARKS = 900;
+const SPARKS = 1600;
 const sparkPos = new Float32Array(SPARKS * 3);
 const sparkCol = new Float32Array(SPARKS * 3);
 const sparkVel = new Float32Array(SPARKS * 3);
@@ -1047,7 +1486,7 @@ function updateFireworks(t) {
   for (let i = pendingFireworks.length - 1; i >= 0; i--) {
     if (pendingFireworks[i].at <= t) {
       const f = pendingFireworks[i];
-      burst(f.pos, f.color, 70, 9);
+      burst(f.pos, f.color, f.n || 70, f.speed || 9);
       pendingFireworks.splice(i, 1);
     }
   }
@@ -1072,12 +1511,12 @@ function updateTree(t) {
   tree.bulbs.forEach((b, i) => {
     const on = age > i * 0.03;
     const tw = 0.93 + 0.07 * Math.sin(t * 1.4 + b.userData.phase);
-    b.material.color.copy(b.userData.color).multiplyScalar(on ? 2.4 * tw : 0.15);
+    b.material.color.copy(b.userData.color).multiplyScalar(on ? 2.4 * tw * night : 0.15);
   });
   const k = Math.min(1, Math.max(0, age - 2.5));
   tree.starMat.color.setRGB(3 * k + 0.4, 2.4 * k + 0.35, 0.8 * k + 0.16);
   tree.star.rotation.y = t * 0.6;
-  tree.light.intensity = 40 * Math.min(1, age / 3);
+  tree.light.intensity = 40 * Math.min(1, age / 3) * night;
 }
 
 // ---------- HUD ----------
@@ -1086,6 +1525,7 @@ function updateStrandUI() {
     const c = state.strand[i];
     g.style.setProperty('--c', c || 'transparent');
     g.classList.toggle('lit', Boolean(c));
+    g.classList.toggle('special', Boolean(state.types[i]));
   });
   ui.count.textContent = `${state.strand.length}/${STRAND_SIZE}`;
   updateHint();
@@ -1124,7 +1564,7 @@ function pickHook() {
 }
 
 function onClick() {
-  if (!state.playing) return;
+  if (!state.playing || state.photo) return;
   const target = pickHook();
   if (!target) return;
   const { cabin, hook } = target;
@@ -1206,7 +1646,7 @@ canvas.addEventListener(
   'wheel',
   (e) => {
     e.preventDefault();
-    orbit.dist = THREE.MathUtils.clamp(orbit.dist + e.deltaY * 0.012, 6, 32);
+    orbit.dist = THREE.MathUtils.clamp(orbit.dist + e.deltaY * 0.012, state.photo ? 3 : 6, state.photo ? 48 : 32);
   },
   { passive: false },
 );
@@ -1222,8 +1662,13 @@ window.addEventListener('keydown', (e) => {
     if (player.position.y === 0) vy = 10;
     e.preventDefault();
   } else if (k === 'q' && state.playing) dropBulb();
-  else if (k === 'escape') cancelHang();
-  else if (k === 'm') toggleMusic();
+  else if (k === 'escape') {
+    if (state.photo) setPhotoMode(false);
+    else cancelHang();
+  } else if (k === 'm') toggleMusic();
+  else if (k === 'f') throwSnowball(clock.elapsedTime);
+  else if (k === 'p') setPhotoMode(!state.photo);
+  else if (k === 'enter' && state.photo) takePhoto();
 });
 window.addEventListener('keyup', (e) => {
   const k = e.key.toLowerCase();
@@ -1238,6 +1683,13 @@ function toggleMusic() {
   ui.music.setAttribute('aria-pressed', String(on));
 }
 ui.music.addEventListener('click', toggleMusic);
+ui.photoBtn.addEventListener('click', () => setPhotoMode(true));
+ui.snap.addEventListener('click', takePhoto);
+ui.photoDone.addEventListener('click', () => setPhotoMode(false));
+ui.hideSteph.addEventListener('click', () => {
+  state.hideSteph = !state.hideSteph;
+  ui.hideSteph.textContent = state.hideSteph ? 'Show Steph' : 'Hide Steph';
+});
 ui.helpToggle.addEventListener('click', () => ui.help.classList.toggle('collapsed'));
 ui.finaleClose.addEventListener('click', () => ui.finale.classList.add('hidden'));
 
@@ -1256,6 +1708,8 @@ window.addEventListener('resize', () => {
   camera.updateProjectionMatrix();
   renderer.setSize(window.innerWidth, window.innerHeight);
   composer.setSize(window.innerWidth, window.innerHeight);
+  renderer.getDrawingBufferSize(rtSize);
+  grade.uniforms.uRes.value.copy(rtSize);
 });
 
 // ---------- loop ----------
@@ -1281,16 +1735,23 @@ function frame() {
   animateRig(dt, t);
   updateCoil(dt, t);
   updateFireworks(t);
+  updateIceBulbs(dt, t);
+  updateSnowballs(dt, t);
+  villagers.update(dt, t, player.position, camera, state.photo);
+  updateTimeOfDay(dt);
   updateSparks(dt);
   updateTree(t);
   world.update(dt, t, player.position);
+  if (state.photo && state.hideSteph) body.visible = false;
 
+  grade.uniforms.uTime.value = t % 100;
   composer.render();
+  if (state.snapRequested) savePhoto(); // read the canvas right after drawing it
   requestAnimationFrame(frame);
 }
 frame();
 
 // testing helper: open with ?debug to poke at the game from the console
 if (new URLSearchParams(location.search).has('debug')) {
-  window.__lights = { state, cabins, player, orbit, camera, renderer, composer, scene, world, updateCamera, updatePlayer, updateHooks, updateGroundBulbs, updateStrands, updateCabinGlow, updateSparks, updateCoil, pickHook, updateStrandUI, hangStrand, get live() { return live; }, get rig() { return rig; }, throwAnim, throwArmAngle };
+  window.__lights = { state, cabins, player, orbit, camera, renderer, composer, scene, world, updateCamera, updatePlayer, updateHooks, updateGroundBulbs, updateStrands, updateCabinGlow, updateSparks, updateCoil, pickHook, updateStrandUI, hangStrand, get live() { return live; }, get rig() { return rig; }, throwAnim, throwArmAngle, villagers, throwSnowball, setPhotoMode, gtao, grade, bloom, iceBulbs, clock };
 }
