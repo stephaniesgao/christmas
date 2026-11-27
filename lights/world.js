@@ -277,42 +277,30 @@ function buildForest(scene, colliders, avoid) {
   });
 }
 
-// snow mounds and snowy rocks scattered across the clearing
+// low snow mounds scattered across the clearing
 function buildDrifts(scene, avoid) {
   const r = rand(77);
   const moundGeo = new THREE.SphereGeometry(1, 14, 8, 0, Math.PI * 2, 0, Math.PI / 2);
   const mounds = new THREE.InstancedMesh(moundGeo, new THREE.MeshStandardMaterial({ color: 0xe6edf8, roughness: 0.95 }), 70);
-  const rockGeo = new THREE.DodecahedronGeometry(1, 0);
-  const rocks = new THREE.InstancedMesh(rockGeo, new THREE.MeshStandardMaterial({ color: 0x6b6f7d, roughness: 1, flatShading: true }), 26);
-  const rockCaps = new THREE.InstancedMesh(moundGeo, new THREE.MeshStandardMaterial({ color: 0xf2f6ff, roughness: 0.9 }), 26);
   const m = new THREE.Matrix4();
   const q = new THREE.Quaternion();
   const s = new THREE.Vector3();
   const p = new THREE.Vector3();
   let placed = 0;
-  let rockCount = 0;
-  for (let tries = 0; tries < 2000 && (placed < 70 || rockCount < 26); tries++) {
+  for (let tries = 0; tries < 2000 && placed < 70; tries++) {
     const a = r() * Math.PI * 2;
     const d = 12 + r() * 70;
     const x = Math.cos(a) * d;
     const z = Math.sin(a) * d;
     if (avoid.some((o) => Math.hypot(o.x - x, o.z - z) < o.r - 2)) continue;
     q.setFromAxisAngle(new THREE.Vector3(0, 1, 0), r() * 6.28);
-    if (placed < 70) {
-      const w = 1.5 + r() * 3.5;
-      m.compose(p.set(x, -0.05, z), q, s.set(w, 0.18 + r() * 0.22, w * (0.5 + r() * 0.5)));
-      mounds.setMatrixAt(placed++, m);
-    } else if (rockCount < 26) {
-      const w = 0.5 + r() * 0.9;
-      m.compose(p.set(x, w * 0.3, z), q, s.set(w, w * 0.7, w * 0.9));
-      rocks.setMatrixAt(rockCount, m);
-      m.compose(p.set(x, w * 0.62, z), q, s.set(w * 0.85, w * 0.3, w * 0.75));
-      rockCaps.setMatrixAt(rockCount++, m);
-    }
+    const w = 1.5 + r() * 3.5;
+    m.compose(p.set(x, -0.05, z), q, s.set(w, 0.18 + r() * 0.22, w * (0.5 + r() * 0.5)));
+    mounds.setMatrixAt(placed++, m);
   }
+  mounds.count = placed;
   mounds.receiveShadow = true;
-  rocks.castShadow = true;
-  scene.add(mounds, rocks, rockCaps);
+  scene.add(mounds);
 }
 
 // ---------- grand tree ----------

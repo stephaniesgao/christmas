@@ -93,42 +93,118 @@ scene.add(player);
 const body = new THREE.Group();
 player.add(body);
 
-// ---- procedural walk cycle ----
-// Steph's model is one unrigged mesh (no skeleton), so the walk is done in the vertex
-// shader using her proportions (model units, 1.9 tall): feet below y≈0.3 split
-// left/right at x=0, arms are the side blobs |x|>0.3 between y≈0.3 and 0.7.
-const walkUniforms = { uPhase: { value: 0 }, uAmt: { value: 0 } };
-function injectWalk(shader) {
-  shader.uniforms.uPhase = walkUniforms.uPhase;
-  shader.uniforms.uAmt = walkUniforms.uAmt;
-  shader.vertexShader =
-    'uniform float uPhase;\nuniform float uAmt;\n' +
-    shader.vertexShader.replace(
-      '#include <begin_vertex>',
-      `#include <begin_vertex>
-      {
-        float side = transformed.x < 0.0 ? 1.0 : -1.0;
-        float sw = sin(uPhase) * side;
-        // feet: step forward/back and lift on the forward swing
-        float foot = 1.0 - smoothstep(0.2, 0.34, transformed.y);
-        transformed.z += foot * sw * 0.14 * uAmt;
-        transformed.y += foot * max(0.0, cos(uPhase) * side) * 0.07 * uAmt;
-        // arms: swing opposite to the leg on the same side, pivoting at the shoulder
-        float arm = smoothstep(0.29, 0.36, abs(transformed.x))
-                  * smoothstep(0.26, 0.33, transformed.y)
-                  * (1.0 - smoothstep(0.64, 0.74, transformed.y));
-        float ang = sw * 0.6 * uAmt * arm;
-        float py = transformed.y - 0.66;
-        float pz = transformed.z;
-        float c = cos(ang);
-        float s = sin(ang);
-        transformed.y = 0.66 + py * c - pz * s;
-        transformed.z = py * s + pz * c;
-        // head: a gentle nod with each step
-        float head = smoothstep(0.7, 0.9, transformed.y);
-        transformed.z += head * abs(sin(uPhase)) * 0.025 * uAmt;
-      }`,
-    );
+// ---- skeleton ----
+// Steph's GLB is a single unrigged mesh. We give it a skeleton at load time: bones are
+// placed from her measured proportions (model units, 1.9 tall, facing +z, her left at
+// +x) and every vertex is skinned by region (feet, arms, head, torso) with soft blends
+// at the joints. That lets the limbs be posed and animated like a normal rigged model.
+let rig = null;
+const smooth = (a, b, x) => {
+  const t = Math.min(1, Math.max(0, (x - a) / (b - a)));
+  return t * t * (3 - 2 * t);
+};
+
+function rigModel(mesh) {
+  const geo = mesh.geometry;
+  const pos = geo.attributes.position;
+  const n = pos.count;
+  const skinIndex = new Uint16Array(n * 4);
+  const skinWeight = new Float32Array(n * 4);
+  // bone order: 0 root, 1 hips, 2 chest, 3 head, 4 armL, 5 armR, 6 handL, 7 handR, 8 legL, 9 legR
+  for (let i = 0; i < n; i++) {
+    const x = pos.getX(i);
+    const y = pos.getY(i);
+    const leg = 1 - smooth(0.2, 0.32, y);
+    const arm = smooth(0.33, 0.38, Math.abs(x)) * smooth(0.27, 0.31, y) * (1 - smooth(0.58, 0.65, y));
+    const head = smooth(0.66, 0.78, y);
+    const torso = Math.max(0, 1 - leg - arm - head);
+    const hipShare = 1 - smooth(0.32, 0.55, y);
+    const left = x > 0;
+    const limbBone = arm >= leg ? (left ? 4 : 5) : left ? 8 : 9;
+    const w = [torso * hipShare, torso * (1 - hipShare), Math.max(arm, leg), head];
+    const sum = w[0] + w[1] + w[2] + w[3] || 1;
+    skinIndex.set([1, 2, limbBone, 3], i * 4);
+    skinWeight.set([w[0] / sum, w[1] / sum, w[2] / sum, w[3] / sum], i * 4);
+  }
+  geo.setAttribute('skinIndex', new THREE.Uint16BufferAttribute(skinIndex, 4));
+  geo.setAttribute('skinWeight', new THREE.Float32BufferAttribute(skinWeight, 4));
+
+  const bone = (x, y, z) => {
+    const b = new THREE.Bone();
+    b.position.set(x, y, z);
+    return b;
+  };
+  const root = bone(0, 0, 0);
+  const hips = bone(0, 0.3, 0.15);
+  const chest = bone(0, 0.2, 0); // (0, 0.5, 0.15)
+  const head = bone(0, 0.2, -0.02); // neck at (0, 0.7, 0.13)
+  const armL = bone(0.38, 0.12, -0.05); // shoulder at (±0.38, 0.62, 0.10)
+  const armR = bone(-0.38, 0.12, -0.05);
+  const handL = bone(0.025, -0.29, 0.01); // hand at (±0.405, 0.33, 0.11)
+  const handR = bone(-0.03, -0.29, 0.01);
+  const legL = bone(0.15, -0.02, 0); // hip joint at (±0.15, 0.28, 0.15)
+  const legR = bone(-0.16, -0.02, 0);
+  root.add(hips);
+  hips.add(chest, legL, legR);
+  chest.add(head, armL, armR);
+  armL.add(handL);
+  armR.add(handR);
+  const bones = [root, hips, chest, head, armL, armR, handL, handR, legL, legR];
+
+  const skinned = new THREE.SkinnedMesh(geo, mesh.material);
+  skinned.position.copy(mesh.position);
+  skinned.quaternion.copy(mesh.quaternion);
+  skinned.scale.copy(mesh.scale);
+  skinned.castShadow = true;
+  skinned.frustumCulled = false;
+  skinned.add(root);
+  mesh.parent.add(skinned);
+  mesh.parent.remove(mesh);
+  skinned.updateWorldMatrix(true, true);
+  skinned.bind(new THREE.Skeleton(bones));
+  return { root, hips, chest, head, armL, armR, handL, handR, legL, legR };
+}
+
+// throw pose: an underhand toss with the right arm, which stays in front of her
+// (her arms are short, so an overhead throw would vanish behind her head)
+const throwAnim = { t: 99 };
+const RELEASE = 0.22;
+function throwArmAngle(t) {
+  if (t < RELEASE) return THREE.MathUtils.lerp(0, 1.0, smooth(0, RELEASE, t)); // swing back
+  if (t < 0.4) return THREE.MathUtils.lerp(1.0, -1.7, smooth(RELEASE, 0.4, t)); // toss forward and up
+  return THREE.MathUtils.lerp(-1.7, 0, smooth(0.4, 0.85, t)); // recover
+}
+
+function animateRig(dt, t) {
+  if (!rig) return;
+  const A = walkAmt;
+  const s = Math.sin(walkPhase);
+  const breathe = Math.sin(t * 1.7);
+  // legs stride; a slight knee-less lift comes from the hip swing
+  rig.legL.rotation.x = -s * 0.6 * A;
+  rig.legR.rotation.x = s * 0.6 * A;
+  rig.hips.rotation.z = s * 0.05 * A;
+  rig.hips.rotation.y = -s * 0.08 * A;
+  rig.chest.rotation.y = s * 0.12 * A;
+  rig.chest.rotation.x = 0.05 * A + breathe * 0.015;
+  rig.head.rotation.y = -s * 0.06 * A + Math.sin(t * 0.5) * 0.06 * (1 - A);
+  rig.head.rotation.z = Math.sin(t * 0.8) * 0.035;
+  rig.head.rotation.x = Math.abs(s) * 0.05 * A;
+  // left arm holds the coil out in front, swinging a little
+  rig.armL.rotation.x = -1.05 + s * 0.15 * A + breathe * 0.02;
+  rig.armL.rotation.z = 0.38;
+  // right arm swings opposite the left leg, or throws
+  throwAnim.t += dt;
+  const throwing = throwAnim.t < 0.85;
+  const swing = -s * 0.65 * A + Math.sin(t * 1.3) * 0.04 * (1 - A);
+  rig.armR.rotation.x = throwing ? throwArmAngle(throwAnim.t) : swing;
+  rig.armR.rotation.z = throwing ? -0.45 * Math.sin(Math.min(1, throwAnim.t / 0.85) * Math.PI) : -0.1;
+  if (throwing) rig.chest.rotation.y += (throwAnim.t < RELEASE ? -0.35 : 0.25) * Math.sin(Math.min(1, throwAnim.t / 0.85) * Math.PI);
+}
+
+function throwHandPosition() {
+  if (rig) return rig.handR.getWorldPosition(new THREE.Vector3());
+  return player.localToWorld(new THREE.Vector3(-0.7, 1.4, 0.4));
 }
 
 // simple stand-in shown while the model loads
@@ -152,9 +228,10 @@ new GLTFLoader().load(
     const scale = 3.1 / size.y;
     model.scale.setScalar(scale);
     model.position.y = -box.min.y * scale;
+    let stephMesh = null;
     model.traverse((o) => {
       if (!o.isMesh) return;
-      o.castShadow = true;
+      stephMesh = o;
       const mat = o.material;
       // The GLB is authored fully metallic, which renders black without reflections.
       // Make it a soft, matte, slightly self-lit cartoon material instead.
@@ -164,13 +241,13 @@ new GLTFLoader().load(
       mat.emissive = new THREE.Color(0xffffff);
       mat.emissiveMap = mat.map;
       mat.emissiveIntensity = 0.45;
-      mat.onBeforeCompile = (shader) => injectWalk(shader);
       mat.needsUpdate = true;
-      // keep the shadow in sync with the walk cycle
-      const depth = new THREE.MeshDepthMaterial({ depthPacking: THREE.RGBADepthPacking });
-      depth.onBeforeCompile = (shader) => injectWalk(shader);
-      o.customDepthMaterial = depth;
     });
+    rig = rigModel(stephMesh);
+    // the coil moves from the stand-in spot into her left hand
+    rig.handL.add(coil);
+    coil.position.set(0, 0, 0);
+    coil.scale.setScalar(1 / scale);
     body.remove(placeholder);
     body.add(model);
     ui.loading.classList.add('hidden');
@@ -292,26 +369,27 @@ function updatePlayer(dt) {
   resolveCollisions(player.position);
 
   const sp = Math.hypot(vel.x, vel.z);
-  if (sp > 0.5) {
-    const targetRot = Math.atan2(vel.x, vel.z);
+  // face the way she's walking, or turn toward the hook she's throwing at
+  let targetRot = null;
+  if (sp > 0.5) targetRot = Math.atan2(vel.x, vel.z);
+  else if (state.faceTarget) targetRot = Math.atan2(state.faceTarget.x - player.position.x, state.faceTarget.z - player.position.z);
+  if (targetRot !== null) {
     let dr = targetRot - player.rotation.y;
     dr = Math.atan2(Math.sin(dr), Math.cos(dr));
     player.rotation.y += dr * (1 - Math.exp(-dt * 12));
   }
-  // walk cycle: limbs in the shader, plus a little bounce and sway on the whole body
+  // walk cycle: bones are posed in animateRig; the whole body gets a little bounce
   const amtTarget = player.position.y > 0.01 ? 0 : Math.min(sp / 9, 1);
   walkAmt += (amtTarget - walkAmt) * (1 - Math.exp(-dt * 10));
   walkPhase += dt * Math.max(sp, 0.001) * 1.15;
   if (walkAmt < 0.02) walkPhase += (Math.round(walkPhase / Math.PI) * Math.PI - walkPhase) * (1 - Math.exp(-dt * 8));
-  walkUniforms.uPhase.value = walkPhase;
-  walkUniforms.uAmt.value = walkAmt;
-  body.position.y = Math.abs(Math.sin(walkPhase)) * 0.13 * walkAmt;
-  body.rotation.z = Math.sin(walkPhase) * 0.05 * walkAmt;
-  body.rotation.x = 0.05 * walkAmt;
+  body.position.y = Math.abs(Math.sin(walkPhase)) * 0.1 * walkAmt;
+  body.rotation.x = 0.04 * walkAmt;
 }
 
+// where the wire leaves her hand (the top of the coil, where she grips it)
 function handPosition() {
-  return coil.localToWorld(new THREE.Vector3(0, -COIL_R, 0));
+  return coil.localToWorld(new THREE.Vector3(0, 0, 0));
 }
 
 // ---------- bulbs on the ground ----------
@@ -344,43 +422,90 @@ function setBulbColor(b, hex) {
 }
 
 // ---------- the coil of wire Steph carries ----------
-// An empty strand coiled in her hand; each collected bulb clips onto the next slot.
+// A bundle of wire loops hanging from her left hand, like a real coiled cord: every
+// loop starts and ends at her grip, fanned out a little, and the bundle swings on a
+// spring as she walks. Each collected bulb clips onto the next spot along the wire.
 const wireMat = new THREE.MeshStandardMaterial({ color: 0x1f3a28, roughness: 0.55 });
-const COIL_R = 0.34;
-const coil = new THREE.Group();
-coil.position.set(1.3, 1.05, 0.45);
+const COIL_LOOPS = 4;
+const LOOP_R = 0.34;
+const coil = new THREE.Group(); // origin = her grip
 coil.rotation.order = 'YXZ';
-coil.rotation.y = Math.PI / 2; // ring faces sideways so it reads as a loop from behind
+coil.position.set(0.75, 1.15, 0.55); // stand-in spot until her model (and hand bone) loads
 body.add(coil);
-const coilCurve = new THREE.CatmullRomCurve3(
-  Array.from({ length: 81 }, (_, i) => {
-    const u = i / 80;
-    const a = u * Math.PI * 2 * 2.6;
-    return new THREE.Vector3((u - 0.5) * 0.3, Math.cos(a) * COIL_R, Math.sin(a) * COIL_R);
-  }),
-);
-coil.add(new THREE.Mesh(new THREE.TubeGeometry(coilCurve, 140, 0.035, 5, false), wireMat));
+const swingRig = new THREE.Group(); // the part that swings under the grip
+coil.add(swingRig);
+
+function loopFrame(li) {
+  const fan = (li - (COIL_LOOPS - 1) / 2) * 0.26;
+  return {
+    fan,
+    ry: LOOP_R * (1.12 + 0.05 * Math.sin(li * 2.1)), // gravity stretches loops a bit
+    rz: LOOP_R * (0.95 + 0.06 * Math.cos(li * 1.7)),
+    dx: (li - (COIL_LOOPS - 1) / 2) * 0.03,
+  };
+}
+function coilPoint(u, target = new THREE.Vector3()) {
+  const f = Math.min(u * COIL_LOOPS, COIL_LOOPS - 1e-6);
+  const li = Math.floor(f);
+  const a = (f - li) * Math.PI * 2;
+  const L = loopFrame(li);
+  // a loop hanging from the grip, in her side plane, then fanned around the vertical
+  target.set(L.dx * Math.sin(a / 2), -L.ry * (1 - Math.cos(a)), L.rz * Math.sin(a));
+  target.applyAxisAngle(new THREE.Vector3(0, 1, 0), L.fan);
+  return target;
+}
+function loopCenter(u) {
+  const li = Math.min(Math.floor(u * COIL_LOOPS), COIL_LOOPS - 1);
+  const L = loopFrame(li);
+  return new THREE.Vector3(0, -L.ry, 0);
+}
+const coilCurve = new THREE.CatmullRomCurve3(Array.from({ length: 161 }, (_, i) => coilPoint(i / 160)));
+swingRig.add(new THREE.Mesh(new THREE.TubeGeometry(coilCurve, 220, 0.028, 5, false), wireMat));
+// her fist around the grip: a short wrap of wire
+const grip = new THREE.Mesh(new THREE.TorusGeometry(0.06, 0.035, 6, 12), wireMat);
+grip.rotation.y = Math.PI / 2;
+swingRig.add(grip);
+
 const coilSlots = [];
 for (let i = 0; i < STRAND_SIZE; i++) {
-  const p = coilCurve.getPointAt((i + 0.5) / STRAND_SIZE);
-  const out = new THREE.Vector3(0, p.y, p.z).normalize();
+  const u = (i + 0.5) / STRAND_SIZE;
+  const p = coilPoint(u);
+  const out = p.clone().sub(loopCenter(u).applyAxisAngle(new THREE.Vector3(0, 1, 0), loopFrame(Math.floor(u * COIL_LOOPS)).fan)).normalize();
   const turn = new THREE.Quaternion().setFromUnitVectors(new THREE.Vector3(0, 1, 0), out.clone().negate());
   const socket = new THREE.Mesh(capGeo, capMat);
-  socket.position.copy(p).addScaledVector(out, 0.05);
+  socket.position.copy(p).addScaledVector(out, 0.04);
   socket.quaternion.copy(turn);
-  socket.scale.setScalar(0.6);
+  socket.scale.setScalar(0.5);
   const bulb = makeBulbMesh('#ffffff', 0.0001);
-  bulb.position.copy(p).addScaledVector(out, 0.2);
+  bulb.position.copy(p).addScaledVector(out, 0.15);
   bulb.quaternion.copy(turn);
-  bulb.userData.glow.scale.setScalar(1.1);
-  coil.add(socket, bulb);
+  bulb.userData.glow.scale.setScalar(0.8);
+  swingRig.add(socket, bulb);
   coilSlots.push({ bulb, pop: 1, shown: false });
 }
 
+// spring-driven swing of the hanging loops
+const coilSwing = { x: 0, vx: 0, z: 0, vz: 0, lastYaw: 0 };
+const tmpFwd = new THREE.Vector3();
 function updateCoil(dt, t) {
-  // swing with her arm (matches the shader's arm swing on this side)
-  coil.position.z = 0.45 + Math.sin(walkPhase) * 0.3 * walkAmt;
-  coil.rotation.z = -Math.sin(walkPhase) * 0.5 * walkAmt;
+  // keep the bundle hanging roughly straight down even as her arm moves
+  if (rig) {
+    coil.rotation.x = -rig.armL.rotation.x;
+    coil.rotation.z = -rig.armL.rotation.z;
+  }
+  // it lags behind when she speeds up and sways when she turns or steps
+  tmpFwd.set(Math.sin(player.rotation.y), 0, Math.cos(player.rotation.y));
+  const fwdSpeed = vel.dot(tmpFwd);
+  let yawRate = (player.rotation.y - coilSwing.lastYaw) / Math.max(dt, 1e-3);
+  yawRate = Math.max(-6, Math.min(6, yawRate));
+  coilSwing.lastYaw = player.rotation.y;
+  const targetX = fwdSpeed * 0.035 + Math.sin(walkPhase * 2) * 0.06 * walkAmt;
+  const targetZ = -yawRate * 0.05 + Math.sin(walkPhase) * 0.08 * walkAmt;
+  coilSwing.vx += (-(coilSwing.x - targetX) * 45 - coilSwing.vx * 4.5) * dt;
+  coilSwing.vz += (-(coilSwing.z - targetZ) * 45 - coilSwing.vz * 4.5) * dt;
+  coilSwing.x += coilSwing.vx * dt;
+  coilSwing.z += coilSwing.vz * dt;
+  swingRig.rotation.set(coilSwing.x, 0, coilSwing.z);
   coilSlots.forEach((slot, i) => {
     const hex = state.strand[i];
     const show = Boolean(hex) && !live;
@@ -391,10 +516,10 @@ function updateCoil(dt, t) {
     slot.shown = show;
     slot.pop = Math.min(1, slot.pop + dt * 4);
     const bounce = 1 + Math.sin(slot.pop * Math.PI) * 0.6;
-    slot.bulb.scale.setScalar(show ? 0.55 * slot.pop * bounce : 0.0001);
+    slot.bulb.scale.setScalar(show ? 0.45 * slot.pop * bounce : 0.0001);
     const ud = slot.bulb.userData;
     ud.mat.color.copy(ud.color).multiplyScalar(1.7 + 0.1 * Math.sin(t * 1.5 + i));
-    ud.glow.material.opacity = 0.4;
+    ud.glow.material.opacity = 0.22;
   });
 }
 
@@ -690,7 +815,9 @@ function setLiveBulbs(n) {
 function startThrowA(cabin, hook) {
   const group = new THREE.Group();
   scene.add(group);
-  live = { cabin, hookA: hook, hookB: null, colors: [...state.strand], phase: 'throwA', t: 0, from: handPosition(), group, wire: null, bulbs: [], sag: 0.5 };
+  live = { cabin, hookA: hook, hookB: null, colors: [...state.strand], phase: 'throwA', t: 0, from: throwHandPosition(), group, wire: null, bulbs: [], sag: 0.5 };
+  throwAnim.t = 0;
+  state.faceTarget = hook.world;
   setLiveBulbs(live.colors.length);
   state.firstHook = { cabin, hook };
   sfx.throw();
@@ -701,8 +828,10 @@ function startThrowB(hook) {
   live.hookB = hook;
   live.phase = 'throwB';
   live.t = 0;
-  live.from = handPosition();
+  live.from = throwHandPosition();
   live.startSag = live.sag;
+  throwAnim.t = 0;
+  state.faceTarget = hook.world;
   setLiveBulbs(bulbCountFor(live.hookA.world, hook.world, live.colors));
   sfx.throw();
 }
@@ -713,6 +842,7 @@ function cancelLive(message) {
   if (live.wire) live.wire.geometry.dispose();
   live = null;
   state.firstHook = null;
+  state.faceTarget = null;
   if (message) toast(message);
   updateHint();
 }
@@ -724,12 +854,15 @@ function updateLive(dt) {
   let a;
   let b;
   if (live.phase === 'throwA') {
-    const k = Math.min(1, live.t / THROW_TIME);
+    // the end stays in her throwing hand through the wind-up, then flies
+    if (live.t < RELEASE) live.from = throwHandPosition();
+    const k = THREE.MathUtils.clamp((live.t - RELEASE) / THROW_TIME, 0, 1);
     a = arc(live.from, live.hookA.world, 1 - Math.pow(1 - k, 2), 2.4);
     b = hand;
     live.sag = 0.3 + 0.4 * k;
     if (k >= 1) {
       live.phase = 'dangling';
+      state.faceTarget = null;
       burst(live.hookA.world, new THREE.Color(0xffe2a0), 14, 2.5);
       sfx.hook();
     }
@@ -743,12 +876,14 @@ function updateLive(dt) {
       return;
     }
   } else if (live.phase === 'throwB') {
-    const k = Math.min(1, live.t / THROW_TIME);
+    if (live.t < RELEASE) live.from = throwHandPosition();
+    const k = THREE.MathUtils.clamp((live.t - RELEASE) / THROW_TIME, 0, 1);
     a = live.hookA.world;
     b = arc(live.from, live.hookB.world, 1 - Math.pow(1 - k, 2), 2);
     live.sag = THREE.MathUtils.lerp(live.startSag, sagFor(a, live.hookB.world), k);
     if (k >= 1) {
       live.phase = 'settle';
+      state.faceTarget = null;
       live.t = 0;
       burst(live.hookB.world, new THREE.Color(0xffe2a0), 14, 2.5);
       sfx.hook();
@@ -1106,6 +1241,7 @@ function frame() {
   updateStrands(t);
   updateCabinGlow(dt, t);
   updateLive(dt);
+  animateRig(dt, t);
   updateCoil(dt, t);
   updateFireworks(t);
   updateSparks(dt);
@@ -1119,5 +1255,5 @@ frame();
 
 // testing helper: open with ?debug to poke at the game from the console
 if (new URLSearchParams(location.search).has('debug')) {
-  window.__lights = { state, cabins, player, orbit, camera, renderer, composer, scene, world, updateCamera, updatePlayer, updateHooks, updateGroundBulbs, updateStrands, updateCabinGlow, updateSparks, updateCoil, pickHook, updateStrandUI, hangStrand, get live() { return live; } };
+  window.__lights = { state, cabins, player, orbit, camera, renderer, composer, scene, world, updateCamera, updatePlayer, updateHooks, updateGroundBulbs, updateStrands, updateCabinGlow, updateSparks, updateCoil, pickHook, updateStrandUI, hangStrand, get live() { return live; }, get rig() { return rig; }, throwAnim, throwArmAngle };
 }
