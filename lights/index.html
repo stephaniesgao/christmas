@@ -3,12 +3,12 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Steph's Christmas Lights</title>
+    <title>Havenfall Lights</title>
     <link rel="icon" href="../public/logo.ico" type="image/x-icon" />
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link
-      href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,500;9..144,700&family=Nunito:wght@400;600;800&display=swap"
+      href="https://fonts.googleapis.com/css2?family=Lilita+One&family=Patrick+Hand&display=swap"
       rel="stylesheet"
     />
     <link rel="stylesheet" href="./style.css" />
@@ -25,64 +25,82 @@
     <canvas id="scene"></canvas>
 
     <section id="title" class="overlay">
-      <div class="card title-card">
-        <p class="eyebrow">A cozy light-decorating game</p>
-        <h1>Steph's Christmas Lights</h1>
-        <p>
-          The snowy village has gone dark. Gather glowing bulbs from the snow, string them together, and hang
-          them on every cabin until the whole town sparkles and the great tree lights up.
+      <div class="card">
+        <svg class="holly" viewBox="0 0 90 44" aria-hidden="true">
+          <path d="M45 26 C 30 6, 14 10, 4 4 C 8 12, 4 16, 10 20 C 6 24, 10 30, 18 28 C 22 34, 30 32, 45 26 Z" fill="#2f6b40" stroke="#1d4429" stroke-width="2" stroke-linejoin="round"/>
+          <path d="M45 26 C 60 6, 76 10, 86 4 C 82 12, 86 16, 80 20 C 84 24, 80 30, 72 28 C 68 34, 60 32, 45 26 Z" fill="#3b7d4c" stroke="#1d4429" stroke-width="2" stroke-linejoin="round"/>
+          <path d="M45 26 C 34 18, 22 16, 10 12 M45 26 C 56 18, 68 16, 80 12" stroke="#1d4429" stroke-width="1.5" fill="none"/>
+          <circle cx="40" cy="28" r="6" fill="#c8343c" stroke="#7d1a20" stroke-width="2"/>
+          <circle cx="51" cy="29" r="6" fill="#d8434a" stroke="#7d1a20" stroke-width="2"/>
+          <circle cx="45" cy="36" r="6" fill="#c8343c" stroke="#7d1a20" stroke-width="2"/>
+          <circle cx="38" cy="26" r="1.6" fill="#fff" opacity=".7"/>
+        </svg>
+        <p class="kicker">a cozy little light-hanging game</p>
+        <h1>Havenfall Lights</h1>
+        <p class="story">
+          The snowy village has gone dark. Gather bulbs from the snow, string them together, and hang them on
+          every cabin until the whole town sparkles and the great tree lights up.
         </p>
-        <button id="start" class="btn primary" type="button">Start decorating</button>
-        <ul class="how">
-          <li><b>1</b> Walk over bulbs to fill an 8-bulb strand</li>
-          <li><b>2</b> Click a glowing hook on a cabin</li>
-          <li><b>3</b> Click a second hook on the same side to hang it</li>
-        </ul>
+        <button id="start" class="btn" type="button">Start decorating</button>
+        <ol class="how">
+          <li>Walk over bulbs to fill your strand</li>
+          <li>Click a glowing hook on a cabin</li>
+          <li>Click another hook on the same side</li>
+        </ol>
       </div>
     </section>
 
     <div id="hud" class="hidden">
-      <div class="card progress-card">
-        <span id="progress-text">0 / 5 cabins glowing</span>
+      <div class="tag progress-tag">
+        <span id="progress-text">0 of 5 cabins lit</span>
         <div id="progress-dots"></div>
       </div>
 
-      <div class="corner">
-        <button id="music-toggle" class="icon-btn off" type="button" aria-label="Toggle music (M)" aria-pressed="false">♪</button>
-      </div>
+      <button id="music-toggle" class="bauble off" type="button" aria-label="Toggle music (M)" aria-pressed="false">
+        <span aria-hidden="true">♪</span>
+      </button>
 
-      <div class="card strand-card">
-        <div class="strand-head">
-          <span class="label">Light strand</span>
+      <div class="strand-bar">
+        <div id="sockets"></div>
+        <div class="strand-note">
+          <span id="strand-count" class="tag count-tag">0/8</span>
+          <p id="hint"></p>
         </div>
-        <div class="wire"><div id="sockets"></div></div>
-        <p id="hint"></p>
       </div>
 
-      <div id="help" class="card help-card collapsed">
-        <button id="help-toggle" type="button" class="help-toggle">Controls</button>
-        <dl>
-          <dt>WASD / arrows</dt><dd>Walk</dd>
-          <dt>Shift</dt><dd>Sprint</dd>
-          <dt>Space</dt><dd>Hop</dd>
-          <dt>Drag / scroll</dt><dd>Look / zoom</dd>
-          <dt>Click hook</dt><dd>Hang lights</dd>
-          <dt>Esc / right-click</dt><dd>Cancel strand</dd>
-          <dt>Q</dt><dd>Drop a bulb</dd>
-          <dt>M</dt><dd>Music</dd>
+      <div id="help" class="help collapsed">
+        <button id="help-toggle" type="button" class="tag help-toggle">Controls</button>
+        <dl class="note">
+          <dt>WASD / arrows</dt><dd>walk</dd>
+          <dt>Shift</dt><dd>sprint</dd>
+          <dt>Space</dt><dd>hop</dd>
+          <dt>Drag / scroll</dt><dd>look &amp; zoom</dd>
+          <dt>Click a hook</dt><dd>throw the strand</dd>
+          <dt>Esc / right-click</dt><dd>reel it back in</dd>
+          <dt>Q</dt><dd>drop a bulb</dd>
+          <dt>M</dt><dd>music</dd>
         </dl>
       </div>
     </div>
 
     <div id="toast" role="status" aria-live="polite"></div>
-    <div id="loading">Loading Steph…</div>
+    <div id="loading">Loading…</div>
 
     <section id="finale" class="overlay hidden">
-      <div class="card title-card">
-        <p class="eyebrow">Merry Christmas</p>
+      <div class="card">
+        <svg class="holly" viewBox="0 0 90 44" aria-hidden="true">
+          <path d="M45 26 C 30 6, 14 10, 4 4 C 8 12, 4 16, 10 20 C 6 24, 10 30, 18 28 C 22 34, 30 32, 45 26 Z" fill="#2f6b40" stroke="#1d4429" stroke-width="2" stroke-linejoin="round"/>
+          <path d="M45 26 C 60 6, 76 10, 86 4 C 82 12, 86 16, 80 20 C 84 24, 80 30, 72 28 C 68 34, 60 32, 45 26 Z" fill="#3b7d4c" stroke="#1d4429" stroke-width="2" stroke-linejoin="round"/>
+          <path d="M45 26 C 34 18, 22 16, 10 12 M45 26 C 56 18, 68 16, 80 12" stroke="#1d4429" stroke-width="1.5" fill="none"/>
+          <circle cx="40" cy="28" r="6" fill="#c8343c" stroke="#7d1a20" stroke-width="2"/>
+          <circle cx="51" cy="29" r="6" fill="#d8434a" stroke="#7d1a20" stroke-width="2"/>
+          <circle cx="45" cy="36" r="6" fill="#c8343c" stroke="#7d1a20" stroke-width="2"/>
+          <circle cx="38" cy="26" r="1.6" fill="#fff" opacity=".7"/>
+        </svg>
+        <p class="kicker">merry christmas!</p>
         <h1>The village is glowing</h1>
-        <p>Every cabin is lit and the great tree is shining. You can keep decorating for extra sparkle.</p>
-        <button id="finale-close" class="btn primary" type="button">Keep decorating</button>
+        <p class="story">Every cabin is lit and the great tree is shining. Keep decorating for extra sparkle.</p>
+        <button id="finale-close" class="btn" type="button">Keep decorating</button>
       </div>
     </section>
 

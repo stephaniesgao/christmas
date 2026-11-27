@@ -1,4 +1,4 @@
-# Steph's Christmas Lights
+# Havenfall Lights
 
 A from-scratch remake of the Christmas village game, focused on decorating with lights.
 It's single-player, runs fully in the browser, and needs no server.

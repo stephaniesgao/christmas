@@ -46,6 +46,7 @@ const ui = {
   hint: $('hint'),
   progress: $('progress-dots'),
   progressText: $('progress-text'),
+  count: $('strand-count'),
   toast: $('toast'),
   music: $('music-toggle'),
   help: $('help'),
@@ -55,16 +56,51 @@ const ui = {
   loading: $('loading'),
 };
 
-for (let i = 0; i < STRAND_SIZE; i++) {
-  const s = document.createElement('span');
-  s.className = 'socket';
-  ui.sockets.appendChild(s);
+// ---- HUD drawings ----
+const SVGNS = 'http://www.w3.org/2000/svg';
+function svgEl(tag, attrs, parent) {
+  const el = document.createElementNS(SVGNS, tag);
+  for (const k in attrs) el.setAttribute(k, attrs[k]);
+  if (parent) parent.appendChild(el);
+  return el;
 }
+
+// the strand bar: a real scalloped wire with C9 bulbs hanging from it
+const strandBulbs = [];
+{
+  const W = 560;
+  const gap = W / STRAND_SIZE;
+  const svg = svgEl('svg', { viewBox: `0 -4 ${W} 70`, class: 'strand-svg', 'aria-hidden': 'true' }, ui.sockets);
+  let d = 'M -6 8';
+  for (let i = 0; i < STRAND_SIZE; i++) d += ` Q ${gap * i + gap / 2} 36 ${gap * (i + 1)} 8`;
+  d += ` L ${W + 6} 6`;
+  svgEl('path', { d, class: 'wire-shadow' }, svg);
+  svgEl('path', { d, class: 'wire' }, svg);
+  for (let i = 0; i < STRAND_SIZE; i++) {
+    const tilt = ((i * 37) % 11) - 5;
+    const g = svgEl('g', { class: 'bulb', transform: `translate(${gap * i + gap / 2} 21) rotate(${tilt})` }, svg);
+    svgEl('path', { class: 'glass', d: 'M -8 9 C -12 19 -6 33 0 39 C 6 33 12 19 8 9 Z' }, g);
+    svgEl('ellipse', { class: 'shine', cx: -3, cy: 18, rx: 1.8, ry: 5 }, g);
+    svgEl('rect', { class: 'cap', x: -5.5, y: 0, width: 11, height: 10, rx: 2 }, g);
+    svgEl('path', { class: 'cap-line', d: 'M -5.5 4 H 5.5 M -5.5 7 H 5.5' }, g);
+    strandBulbs.push(g);
+  }
+}
+
+// little cabin sketches whose windows warm up as each cabin is decorated
 cabins.forEach((c) => {
-  const d = document.createElement('span');
-  d.className = 'dot';
-  d.title = c.name;
-  ui.progress.appendChild(d);
+  const svg = svgEl('svg', { viewBox: '0 0 34 32', class: 'cabin-icon' }, ui.progress);
+  svgEl('title', {}, svg).textContent = c.name;
+  svgEl('path', { class: 'roof', d: 'M 2 15 L 17 3 L 32 15 Z' }, svg);
+  svgEl('path', { class: 'roof-snow', d: 'M 4 13.5 L 17 3.2 L 30 13.5 L 27 13 L 17 6 L 7 13 Z' }, svg);
+  svgEl('rect', { class: 'walls', x: 7, y: 14, width: 20, height: 15 }, svg);
+  svgEl('rect', { class: 'door', x: 15, y: 20, width: 4.5, height: 9 }, svg);
+  svgEl('rect', { class: 'win', x: 9.5, y: 18, width: 4, height: 4 }, svg);
+  svgEl('rect', { class: 'win', x: 21, y: 18, width: 4, height: 4 }, svg);
+  const lights = svgEl('g', { class: 'roof-lights' }, svg);
+  ['#ff4d63', '#ffcf4a', '#5ef0a6', '#5aaeff', '#f08cff'].forEach((col, k) => {
+    svgEl('circle', { cx: 6 + k * 5.5, cy: 15.5 + (k % 2), r: 1.4, fill: col }, lights);
+  });
 });
 
 let toastTimer;
@@ -1046,29 +1082,30 @@ function updateTree(t) {
 
 // ---------- HUD ----------
 function updateStrandUI() {
-  [...ui.sockets.children].forEach((s, i) => {
+  strandBulbs.forEach((g, i) => {
     const c = state.strand[i];
-    s.style.setProperty('--c', c || 'transparent');
-    s.classList.toggle('filled', Boolean(c));
+    g.style.setProperty('--c', c || 'transparent');
+    g.classList.toggle('lit', Boolean(c));
   });
+  ui.count.textContent = `${state.strand.length}/${STRAND_SIZE}`;
   updateHint();
 }
 function updateHint() {
   const n = state.strand.length;
   let text;
-  if (state.firstHook) text = `Now click a second hook on the same side of ${state.firstHook.cabin.name}. Right-click or Esc to cancel.`;
-  else if (n >= STRAND_SIZE) text = 'Strand full! Click a glowing hook on a cabin.';
-  else if (n === 0) text = 'Walk over the glowing bulbs in the snow to collect them.';
-  else text = `Collect ${STRAND_SIZE - n} more bulb${STRAND_SIZE - n === 1 ? '' : 's'} to fill your strand.`;
+  if (state.firstHook) text = 'Now click a second hook on the same side (Esc to reel it back in)';
+  else if (n >= STRAND_SIZE) text = "Strand's full! Click a glowing hook on a cabin";
+  else if (n === 0) text = 'Walk over the glowing bulbs in the snow';
+  else text = `${STRAND_SIZE - n} more bulb${STRAND_SIZE - n === 1 ? '' : 's'} to fill your strand`;
   ui.hint.textContent = text;
 }
 function updateProgressUI() {
   const done = cabins.filter((c) => c.complete).length;
-  ui.progressText.textContent = `${done} / ${cabins.length} cabins glowing`;
-  [...ui.progress.children].forEach((d, i) => {
+  ui.progressText.textContent = `${done} of ${cabins.length} cabins lit`;
+  [...ui.progress.children].forEach((icon, i) => {
     const c = cabins[i];
-    d.style.setProperty('--fill', `${Math.min(1, c.strands / STRANDS_PER_CABIN) * 100}%`);
-    d.classList.toggle('done', c.complete);
+    icon.style.setProperty('--glow', Math.min(1, c.strands / STRANDS_PER_CABIN));
+    icon.classList.toggle('done', c.complete);
   });
 }
 updateStrandUI();

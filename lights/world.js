@@ -20,26 +20,164 @@ function rand(seed) {
   };
 }
 
-// ---------- textures ----------
-function snowTexture() {
+// ---------- painted textures ----------
+// Everything is painted onto canvases at startup: soft brushy blotches and strokes
+// instead of photo detail, so surfaces read as hand-painted rather than flat or noisy.
+
+// draw a shape at its spot plus its wrapped copies so the texture tiles seamlessly
+function wrapDraw(w, h, x, y, rad, fn) {
+  for (const ox of [-w, 0, w]) {
+    for (const oy of [-h, 0, h]) {
+      if (x + ox + rad < 0 || x + ox - rad > w || y + oy + rad < 0 || y + oy - rad > h) continue;
+      fn(x + ox, y + oy);
+    }
+  }
+}
+
+function paintSnow(size, seed, { ripples }) {
   const c = document.createElement('canvas');
-  c.width = c.height = 256;
+  c.width = c.height = size;
   const g = c.getContext('2d');
-  g.fillStyle = '#e9f0fa';
-  g.fillRect(0, 0, 256, 256);
-  const r = rand(7);
-  for (let i = 0; i < 1400; i++) {
-    const v = 200 + Math.floor(r() * 55);
-    g.fillStyle = `rgba(${v - 20},${v - 8},${v},${0.25 + r() * 0.3})`;
-    g.beginPath();
-    g.arc(r() * 256, r() * 256, 1 + r() * 5, 0, Math.PI * 2);
-    g.fill();
+  const r = rand(seed);
+  g.fillStyle = '#e3eaf6';
+  g.fillRect(0, 0, size, size);
+  // big soft patches of cool shadow and warm-white highlight
+  for (let i = 0; i < 46; i++) {
+    const x = r() * size;
+    const y = r() * size;
+    const rad = size * (0.08 + r() * 0.18);
+    const light = r() > 0.45;
+    wrapDraw(size, size, x, y, rad, (px, py) => {
+      const grad = g.createRadialGradient(px, py, 0, px, py, rad);
+      grad.addColorStop(0, light ? 'rgba(250,252,255,0.55)' : 'rgba(184,198,228,0.4)');
+      grad.addColorStop(1, light ? 'rgba(250,252,255,0)' : 'rgba(184,198,228,0)');
+      g.fillStyle = grad;
+      g.fillRect(px - rad, py - rad, rad * 2, rad * 2);
+    });
+  }
+  // wind-swept ripples
+  if (ripples) {
+    g.lineCap = 'round';
+    for (let i = 0; i < 140; i++) {
+      const x = r() * size;
+      const y = r() * size;
+      const len = size * (0.04 + r() * 0.08);
+      const bend = (r() - 0.5) * len * 0.5;
+      const dark = r() > 0.4;
+      g.strokeStyle = dark ? `rgba(165,180,214,${0.2 + r() * 0.2})` : `rgba(255,255,255,${0.35 + r() * 0.3})`;
+      g.lineWidth = 1.5 + r() * 2.5;
+      wrapDraw(size, size, x, y, len, (px, py) => {
+        g.beginPath();
+        g.moveTo(px - len / 2, py);
+        g.quadraticCurveTo(px, py + bend, px + len / 2, py + bend * 0.3);
+        g.stroke();
+      });
+    }
   }
   const tex = new THREE.CanvasTexture(c);
   tex.colorSpace = THREE.SRGBColorSpace;
   tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
-  tex.repeat.set(40, 40);
+  tex.anisotropy = 4;
   return tex;
+}
+
+// tiny glints, used as an emissive map so fresh snow catches the light
+function paintSparkles(size, seed, count) {
+  const c = document.createElement('canvas');
+  c.width = c.height = size;
+  const g = c.getContext('2d');
+  const r = rand(seed);
+  g.fillStyle = '#000';
+  g.fillRect(0, 0, size, size);
+  for (let i = 0; i < count; i++) {
+    const x = r() * size;
+    const y = r() * size;
+    const big = r() > 0.85;
+    g.fillStyle = `rgba(255,255,255,${0.5 + r() * 0.5})`;
+    if (big) {
+      // four-point twinkle
+      g.beginPath();
+      g.moveTo(x, y - 3);
+      g.lineTo(x + 0.8, y - 0.8);
+      g.lineTo(x + 3, y);
+      g.lineTo(x + 0.8, y + 0.8);
+      g.lineTo(x, y + 3);
+      g.lineTo(x - 0.8, y + 0.8);
+      g.lineTo(x - 3, y);
+      g.lineTo(x - 0.8, y - 0.8);
+      g.fill();
+    } else {
+      g.fillRect(x, y, 1.2, 1.2);
+    }
+  }
+  const tex = new THREE.CanvasTexture(c);
+  tex.colorSpace = THREE.SRGBColorSpace;
+  tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
+  return tex;
+}
+
+// brushy pine needles in light neutral tones; instance/material color tints them green
+function paintNeedles() {
+  const size = 256;
+  const c = document.createElement('canvas');
+  c.width = c.height = size;
+  const g = c.getContext('2d');
+  const r = rand(321);
+  g.fillStyle = '#b9c6bb';
+  g.fillRect(0, 0, size, size);
+  g.lineCap = 'round';
+  // rows of drooping boughs: a darker shadow band under each row
+  for (let row = 0; row < 4; row++) {
+    const y = row * (size / 4) + size / 8;
+    const grad = g.createLinearGradient(0, y - 18, 0, y + 30);
+    grad.addColorStop(0, 'rgba(70,90,78,0)');
+    grad.addColorStop(1, 'rgba(70,90,78,0.45)');
+    g.fillStyle = grad;
+    g.fillRect(0, y - 18, size, 48);
+  }
+  // needle strokes, mostly pointing down and out
+  for (let i = 0; i < 900; i++) {
+    const x = r() * size;
+    const y = r() * size;
+    const len = 8 + r() * 16;
+    const ang = Math.PI / 2 + (r() - 0.5) * 0.9;
+    const tone = r();
+    g.strokeStyle = tone > 0.62 ? `rgba(245,250,240,${0.35 + r() * 0.35})` : `rgba(80,100,88,${0.3 + r() * 0.35})`;
+    g.lineWidth = 1.5 + r() * 2;
+    wrapDraw(size, size, x, y, len, (px, py) => {
+      g.beginPath();
+      g.moveTo(px, py);
+      g.lineTo(px + Math.cos(ang) * len, py + Math.sin(ang) * len);
+      g.stroke();
+    });
+  }
+  const tex = new THREE.CanvasTexture(c);
+  tex.colorSpace = THREE.SRGBColorSpace;
+  tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
+  tex.repeat.set(3, 1.5);
+  tex.anisotropy = 4;
+  return tex;
+}
+
+const groundSnowTex = paintSnow(512, 7, { ripples: true });
+groundSnowTex.repeat.set(26, 26);
+const groundSparkleTex = paintSparkles(512, 8, 260);
+groundSparkleTex.repeat.set(26, 26);
+const surfaceSnowTex = paintSnow(256, 11, { ripples: false });
+const surfaceSparkleTex = paintSparkles(256, 12, 90);
+const needleTex = paintNeedles();
+
+// shared look for every snowy surface (roofs, caps, sills, drifts)
+function snowMaterial(extra = {}) {
+  return new THREE.MeshStandardMaterial({
+    map: surfaceSnowTex,
+    color: 0xffffff,
+    roughness: 0.8,
+    emissive: 0xffffff,
+    emissiveMap: surfaceSparkleTex,
+    emissiveIntensity: 0.5,
+    ...extra,
+  });
 }
 
 let glowTex;
@@ -256,8 +394,8 @@ function buildForest(scene, colliders, avoid) {
   scene.add(trunk);
 
   const greens = [new THREE.Color(0x1d4a36), new THREE.Color(0x2a6045), new THREE.Color(0x335f3a), new THREE.Color(0x1f5246)];
-  const needleMat = new THREE.MeshStandardMaterial({ roughness: 0.85, flatShading: true, side: THREE.DoubleSide });
-  const snowMat = new THREE.MeshStandardMaterial({ color: 0xf3f7ff, roughness: 0.7, flatShading: true, side: THREE.DoubleSide });
+  const needleMat = new THREE.MeshStandardMaterial({ map: needleTex, roughness: 0.85, flatShading: true, side: THREE.DoubleSide });
+  const snowMat = snowMaterial({ flatShading: true, side: THREE.DoubleSide });
   const col = new THREE.Color();
   tiers.forEach((tier, ti) => {
     const mesh = new THREE.InstancedMesh(tierGeo(tier.r, tier.h, 14, 0.38, 10 + ti), needleMat, spots.length);
@@ -267,7 +405,7 @@ function buildForest(scene, colliders, avoid) {
       m.compose(p.set(t.x, tier.y * t.s, t.z), q, sc.set(t.sx, t.s, t.sx));
       mesh.setMatrixAt(i, m);
       // lighter tiers toward the top, plus per-tree hue variety
-      col.copy(greens[Math.floor(t.tint * greens.length)]).multiplyScalar(0.85 + ti * 0.08);
+      col.copy(greens[Math.floor(t.tint * greens.length)]).multiplyScalar(1.15 + ti * 0.1);
       mesh.setColorAt(i, col);
       m.compose(p.set(t.x, (tier.y + tier.h * 0.27) * t.s, t.z), q, sc.set(t.sx, t.s, t.sx));
       snow.setMatrixAt(i, m);
@@ -281,7 +419,7 @@ function buildForest(scene, colliders, avoid) {
 function buildDrifts(scene, avoid) {
   const r = rand(77);
   const moundGeo = new THREE.SphereGeometry(1, 14, 8, 0, Math.PI * 2, 0, Math.PI / 2);
-  const mounds = new THREE.InstancedMesh(moundGeo, new THREE.MeshStandardMaterial({ color: 0xe6edf8, roughness: 0.95 }), 70);
+  const mounds = new THREE.InstancedMesh(moundGeo, snowMaterial({ color: 0xeef2fa }), 70);
   const m = new THREE.Matrix4();
   const q = new THREE.Quaternion();
   const s = new THREE.Vector3();
@@ -309,8 +447,8 @@ function buildGrandTree(scene, colliders) {
   const tiers = 6;
   const height = 17;
   const baseR = 6;
-  const green = new THREE.MeshStandardMaterial({ color: 0x1f553c, roughness: 0.85, flatShading: true, side: THREE.DoubleSide });
-  const snowMat = new THREE.MeshStandardMaterial({ color: 0xf4f7ff, roughness: 0.75, flatShading: true, side: THREE.DoubleSide });
+  const green = new THREE.MeshStandardMaterial({ map: needleTex, color: 0x2a6b4c, roughness: 0.85, flatShading: true, side: THREE.DoubleSide });
+  const snowMat = snowMaterial({ flatShading: true, side: THREE.DoubleSide });
   for (let i = 0; i < tiers; i++) {
     const f = i / tiers;
     const r = baseR * (1 - f * 0.8);
@@ -373,7 +511,7 @@ function buildGrandTree(scene, colliders) {
   ring.material.map.repeat.set(10, 1);
   ring.material.map.needsUpdate = true;
   ring.position.y = 0.35;
-  const top = new THREE.Mesh(new THREE.CylinderGeometry(7.45, 7.45, 0.25, 32), new THREE.MeshStandardMaterial({ color: 0xf4f7ff, roughness: 0.8 }));
+  const top = new THREE.Mesh(new THREE.CylinderGeometry(7.45, 7.45, 0.25, 32), snowMaterial());
   top.position.y = 0.72;
   top.receiveShadow = true;
   group.add(ring, top);
@@ -406,7 +544,7 @@ function buildCabin(scene, style, index, position, rotationY) {
   const rnd = rand(500 + index * 31);
 
   const trimMat = new THREE.MeshStandardMaterial({ color: style.trim, roughness: 0.7 });
-  const snowMat = new THREE.MeshStandardMaterial({ color: 0xf3f6fc, roughness: 0.75 });
+  const snowMat = snowMaterial();
   const doorMat = new THREE.MeshStandardMaterial({ color: style.door, map: plankTex, roughness: 0.7 });
   const stoneMat = new THREE.MeshStandardMaterial({ map: stoneTex, roughness: 1 });
 
@@ -568,12 +706,12 @@ function buildCabin(scene, style, index, position, rotationY) {
     wg.position.set(x, y, z);
     wg.rotation.y = ry;
     const pane = new THREE.Mesh(new THREE.PlaneGeometry(1.6, 1.5), windowMat);
-    pane.position.z = 0.02;
+    pane.position.z = 0.035; // clear of the frame face so they never z-fight
     const frame = new THREE.Mesh(new THREE.BoxGeometry(1.9, 1.8, 0.1), trimMat);
-    frame.position.z = -0.03;
+    frame.position.z = -0.06; // front face at -0.01
     const fv = new THREE.Mesh(new THREE.BoxGeometry(0.1, 1.5, 0.08), trimMat);
     const fh = new THREE.Mesh(new THREE.BoxGeometry(1.6, 0.1, 0.08), trimMat);
-    fv.position.z = fh.position.z = 0.06;
+    fv.position.z = fh.position.z = 0.075;
     const sill = new THREE.Mesh(new THREE.BoxGeometry(2.1, 0.14, 0.4), trimMat);
     sill.position.set(0, -0.95, 0.15);
     const sillSnow = new THREE.Mesh(new RoundedBoxGeometry(2.05, 0.16, 0.38, 2, 0.07), snowMat);
@@ -767,7 +905,7 @@ export function buildWorld(scene) {
 
   const ground = new THREE.Mesh(
     new THREE.CircleGeometry(220, 64),
-    new THREE.MeshStandardMaterial({ map: snowTexture(), color: 0xc9d5ea, roughness: 0.95 }),
+    new THREE.MeshStandardMaterial({ map: groundSnowTex, color: 0xd3dcee, roughness: 0.95, emissive: 0xffffff, emissiveMap: groundSparkleTex, emissiveIntensity: 0.55 }),
   );
   ground.rotation.x = -Math.PI / 2;
   ground.receiveShadow = true;
