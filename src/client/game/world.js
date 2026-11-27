@@ -1898,9 +1898,6 @@ function createDecorationMesh(data) {
         );
         halo.scale.set(0.9, 0.9, 0.9);
         bulb.add(halo);
-        const light = new THREE.PointLight(bulbColor, 0.9, 4, 2.5);
-        light.position.copy(bulb.position);
-        group.add(light);
         group.add(bulb);
       }
       mesh = group;

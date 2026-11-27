@@ -112,6 +112,9 @@ export function createGameContext() {
     uiDots: [],
     swingPhase: 0,
     cachedPoints: [],
+    tubeUpdateTimer: 0,
+    pointCache: [],
+    curve: null,
   };
   const stringPlacementState = {
     stage: 'IDLE',
@@ -151,6 +154,9 @@ export function createGameContext() {
   const tempVecA = new THREE.Vector3();
   const tempVecB = new THREE.Vector3();
   const tempVecC = new THREE.Vector3();
+  const tempVecD = new THREE.Vector3();
+  const tempVecE = new THREE.Vector3();
+  const tempVecF = new THREE.Vector3();
 
   const remotePlayers = new Map();
   const decorationMeshes = new Map();
@@ -221,6 +227,9 @@ export function createGameContext() {
     tempVecA,
     tempVecB,
     tempVecC,
+    tempVecD,
+    tempVecE,
+    tempVecF,
 
     // Mutable runtime state
     autoFollowPaused: false,

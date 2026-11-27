@@ -1,0 +1,125 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Havenfall Lights</title>
+    <link rel="icon" href="../public/logo.ico" type="image/x-icon" />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Lilita+One&family=Patrick+Hand&display=swap"
+      rel="stylesheet"
+    />
+    <link rel="stylesheet" href="./style.css" />
+    <script type="importmap">
+      {
+        "imports": {
+          "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+          "three/examples/jsm/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+        }
+      }
+    </script>
+  </head>
+  <body>
+    <canvas id="scene"></canvas>
+
+    <section id="title" class="overlay">
+      <div class="card">
+        <svg class="holly" viewBox="0 0 90 44" aria-hidden="true">
+          <path d="M45 26 C 30 6, 14 10, 4 4 C 8 12, 4 16, 10 20 C 6 24, 10 30, 18 28 C 22 34, 30 32, 45 26 Z" fill="#2f6b40" stroke="#1d4429" stroke-width="2" stroke-linejoin="round"/>
+          <path d="M45 26 C 60 6, 76 10, 86 4 C 82 12, 86 16, 80 20 C 84 24, 80 30, 72 28 C 68 34, 60 32, 45 26 Z" fill="#3b7d4c" stroke="#1d4429" stroke-width="2" stroke-linejoin="round"/>
+          <path d="M45 26 C 34 18, 22 16, 10 12 M45 26 C 56 18, 68 16, 80 12" stroke="#1d4429" stroke-width="1.5" fill="none"/>
+          <circle cx="40" cy="28" r="6" fill="#c8343c" stroke="#7d1a20" stroke-width="2"/>
+          <circle cx="51" cy="29" r="6" fill="#d8434a" stroke="#7d1a20" stroke-width="2"/>
+          <circle cx="45" cy="36" r="6" fill="#c8343c" stroke="#7d1a20" stroke-width="2"/>
+          <circle cx="38" cy="26" r="1.6" fill="#fff" opacity=".7"/>
+        </svg>
+        <p class="kicker">a cozy little light-hanging game</p>
+        <h1>Havenfall Lights</h1>
+        <p class="story">
+          The snowy village has gone dark. Gather bulbs from the snow, string them together, and hang them on
+          every cabin until the whole town sparkles and the great tree lights up.
+        </p>
+        <button id="start" class="btn" type="button">Start decorating</button>
+        <ol class="how">
+          <li>Walk over bulbs to fill your strand</li>
+          <li>Click a glowing hook on a cabin</li>
+          <li>Click another hook on the same side</li>
+        </ol>
+      </div>
+    </section>
+
+    <div id="hud" class="hidden">
+      <div class="tag progress-tag">
+        <span id="progress-text">0 of 5 cabins lit</span>
+        <div id="progress-dots"></div>
+      </div>
+
+      <button id="music-toggle" class="bauble off" type="button" aria-label="Toggle music (M)" aria-pressed="false">
+        <span aria-hidden="true">♪</span>
+      </button>
+      <button id="photo-toggle" class="bauble green" type="button" aria-label="Photo mode (P)">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="7" width="18" height="12" rx="2.5" fill="none" stroke="currentColor" stroke-width="2"/><path d="M8 7l1.6-2.5h4.8L16 7" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/><circle cx="12" cy="13" r="3.4" fill="none" stroke="currentColor" stroke-width="2"/></svg>
+      </button>
+
+      <div class="strand-bar">
+        <div id="sockets"></div>
+        <div class="strand-note">
+          <span id="strand-count" class="tag count-tag">0/8</span>
+          <p id="hint"></p>
+        </div>
+      </div>
+
+      <div id="help" class="help collapsed">
+        <button id="help-toggle" type="button" class="tag help-toggle">Controls</button>
+        <dl class="note">
+          <dt>WASD / arrows</dt><dd>walk</dd>
+          <dt>Shift</dt><dd>sprint</dd>
+          <dt>Space</dt><dd>hop</dd>
+          <dt>Drag / scroll</dt><dd>look &amp; zoom</dd>
+          <dt>Click a hook</dt><dd>throw the strand</dd>
+          <dt>Esc / right-click</dt><dd>reel it back in</dd>
+          <dt>F</dt><dd>throw a snowball</dd>
+          <dt>P</dt><dd>photo mode</dd>
+          <dt>Q</dt><dd>drop a bulb</dd>
+          <dt>M</dt><dd>music</dd>
+        </dl>
+      </div>
+    </div>
+
+    <div id="toast" role="status" aria-live="polite"></div>
+    <div id="speech" aria-live="polite"></div>
+
+    <div id="photo-ui">
+      <p class="photo-tip">Drag to frame your shot · scroll to zoom · Enter to snap</p>
+      <div class="photo-buttons">
+        <button id="hide-steph" class="tag" type="button">Hide Steph</button>
+        <button id="snap" class="btn" type="button">Snap!</button>
+        <button id="photo-done" class="tag" type="button">Done</button>
+      </div>
+    </div>
+    <div id="flash"></div>
+    <div id="loading">Loading…</div>
+
+    <section id="finale" class="overlay hidden">
+      <div class="card">
+        <svg class="holly" viewBox="0 0 90 44" aria-hidden="true">
+          <path d="M45 26 C 30 6, 14 10, 4 4 C 8 12, 4 16, 10 20 C 6 24, 10 30, 18 28 C 22 34, 30 32, 45 26 Z" fill="#2f6b40" stroke="#1d4429" stroke-width="2" stroke-linejoin="round"/>
+          <path d="M45 26 C 60 6, 76 10, 86 4 C 82 12, 86 16, 80 20 C 84 24, 80 30, 72 28 C 68 34, 60 32, 45 26 Z" fill="#3b7d4c" stroke="#1d4429" stroke-width="2" stroke-linejoin="round"/>
+          <path d="M45 26 C 34 18, 22 16, 10 12 M45 26 C 56 18, 68 16, 80 12" stroke="#1d4429" stroke-width="1.5" fill="none"/>
+          <circle cx="40" cy="28" r="6" fill="#c8343c" stroke="#7d1a20" stroke-width="2"/>
+          <circle cx="51" cy="29" r="6" fill="#d8434a" stroke="#7d1a20" stroke-width="2"/>
+          <circle cx="45" cy="36" r="6" fill="#c8343c" stroke="#7d1a20" stroke-width="2"/>
+          <circle cx="38" cy="26" r="1.6" fill="#fff" opacity=".7"/>
+        </svg>
+        <p class="kicker">merry christmas!</p>
+        <h1>The village is glowing</h1>
+        <p class="story">Every cabin is lit and the great tree is shining. Keep decorating for extra sparkle.</p>
+        <button id="finale-close" class="btn" type="button">Keep decorating</button>
+      </div>
+    </section>
+
+    <script type="module" src="./main.js"></script>
+  </body>
+</html>

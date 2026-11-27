@@ -59,6 +59,7 @@ const STRING_STAGES = {
 };
 
 const THROW_DURATION_MS = 500;
+const STRAND_TUBE_UPDATE_INTERVAL = 1 / 12;
 
 export function initStrand(context) {
   if (strandBar) {
@@ -80,18 +81,28 @@ export function updateLightStrand(context, delta, elapsed) {
   const axisStart = palmAnchor.x + 0.15;
   const centerZ = 0.5;
   const centerY = 1.28;
-  const points = [palmAnchor.clone()];
+  const points = strandState.pointCache;
   const helixSegments = STRAND_SEGMENTS;
+  if (!points.length) {
+    for (let i = 0; i <= helixSegments + 2; i += 1) {
+      points.push(new THREE.Vector3());
+    }
+  }
+  points[0].copy(palmAnchor);
   for (let i = 0; i <= helixSegments; i += 1) {
     const t = i / helixSegments;
     const angle = t * Math.PI * 2 * loopCount;
     const x = axisStart + t * axisLength;
     const y = centerY + Math.cos(angle) * coilRadius * 0.55 + Math.sin(elapsed * 1 + t * 4) * 0.05;
     const z = centerZ + Math.sin(angle) * coilRadius;
-    points.push(new THREE.Vector3(x, y, z));
+    points[i + 1].set(x, y, z);
   }
-  points.push(new THREE.Vector3(axisStart + axisLength + 0.1, 1.02, centerZ - 0.12));
-  const curve = new three.CatmullRomCurve3(points, false, 'catmullrom', 0.4);
+  points[helixSegments + 2].set(axisStart + axisLength + 0.1, 1.02, centerZ - 0.12);
+  const curve =
+    strandState.curve ||
+    new three.CatmullRomCurve3(points, false, 'catmullrom', 0.4);
+  curve.points = points;
+  strandState.curve = curve;
   const samples = curve.getPoints(STRAND_SEGMENTS);
   strandState.cachedPoints = samples;
   const positions = strandState.line.geometry.attributes.position;
@@ -99,16 +110,19 @@ export function updateLightStrand(context, delta, elapsed) {
     positions.setXYZ(index, point.x, point.y, point.z);
   });
   positions.needsUpdate = true;
-  strandState.line.geometry.computeBoundingSphere();
   if (strandState.tubeMesh) {
-    strandState.tubeMesh.geometry.dispose();
-    strandState.tubeMesh.geometry = new three.TubeGeometry(
-      curve,
-      STRAND_SEGMENTS * 2,
-      0.05,
-      10,
-      false,
-    );
+    strandState.tubeUpdateTimer += delta;
+    if (strandState.tubeUpdateTimer >= STRAND_TUBE_UPDATE_INTERVAL) {
+      strandState.tubeUpdateTimer = 0;
+      strandState.tubeMesh.geometry.dispose();
+      strandState.tubeMesh.geometry = new three.TubeGeometry(
+        curve,
+        STRAND_SEGMENTS,
+        0.05,
+        6,
+        false,
+      );
+    }
   }
 
   if (strandState.bulbMeshes.length) {
@@ -160,7 +174,6 @@ function initLightStrand(context) {
   const bulbMeshes = [];
   const socketMaterials = [];
   const socketAuras = [];
-  const socketLights = [];
   for (let i = 0; i < STRAND_SOCKET_COUNT; i += 1) {
     const material = new THREE.MeshStandardMaterial({
       color: 0x1f8b44,
@@ -182,15 +195,11 @@ function initLightStrand(context) {
       }),
     );
     aura.scale.set(0.5, 0.5, 0.5);
-    const light = new THREE.PointLight(0xffffff, 0, 2.5, 2);
-    light.position.set(0, 0, 0);
     bulb.add(aura);
-    bulb.add(light);
     group.add(bulb);
     bulbMeshes.push(bulb);
     socketMaterials.push(material);
     socketAuras.push(aura);
-    socketLights.push(light);
   }
   localPlayer.group.add(group);
   strandState.group = group;
@@ -199,7 +208,7 @@ function initLightStrand(context) {
   strandState.bulbMeshes = bulbMeshes;
   strandState.socketMaterials = socketMaterials;
   strandState.socketAuras = socketAuras;
-  strandState.socketLights = socketLights;
+  strandState.socketLights = [];
   // Hide the old coil visual so nothing sits under the character.
   context.coilState.mesh = null;
   context.coilState.lightNodes = [];
@@ -322,7 +331,6 @@ function updateStrandVisual(context, index) {
   const { strandState } = context;
   const material = strandState.socketMaterials[index];
   const aura = strandState.socketAuras[index];
-  const light = strandState.socketLights[index];
   if (!material) return;
   const color = strandState.sockets[index];
   if (color) {
@@ -334,10 +342,6 @@ function updateStrandVisual(context, index) {
       aura.material.opacity = 1;
       aura.visible = true;
     }
-    if (light) {
-      light.color.set(color);
-      light.intensity = 0.9;
-    }
   } else {
     material.color.set(0x1f8b44);
     material.emissive.set(0x000000);
@@ -345,9 +349,6 @@ function updateStrandVisual(context, index) {
     if (aura) {
       aura.visible = false;
       aura.material.opacity = 0;
-    }
-    if (light) {
-      light.intensity = 0;
     }
   }
 }
@@ -442,6 +443,7 @@ export function updateBulbPickups(context, delta, elapsed) {
       }
       if (!pickup.requireExitBeforeCollect || distance > 1.2) {
         pickup.collected = true;
+        pickup.mesh.visible = false;
         addBulbToStrand(context, pickup.color);
         playChime([660, 880]);
         context.scene.remove(pickup.mesh);
@@ -674,11 +676,10 @@ export function updateDropProjectiles(context) {
   for (let i = dropProjectiles.length - 1; i >= 0; i -= 1) {
     const effect = dropProjectiles[i];
     const t = Math.min(1, (now - effect.startTime) / effect.duration);
-    const position = evaluateQuadratic(effect.start, effect.control, effect.end, t);
-    effect.mesh.position.copy(position);
+    setQuadraticPosition(effect.mesh.position, effect.start, effect.control, effect.end, t);
     if (t >= 1) {
       dropProjectiles.splice(i, 1);
-      const spawnPoint = effect.end.clone();
+      const spawnPoint = effect.end;
       const groundY = sampleTerrainHeight(context, spawnPoint);
       const baseY = groundY + BULB_HOVER_OFFSET;
       const restHeight = baseY;
@@ -701,10 +702,13 @@ export function updateDropProjectiles(context) {
   }
 }
 
-function evaluateQuadratic(a, b, c, t) {
-  const ab = new THREE.Vector3().lerpVectors(a, b, t);
-  const bc = new THREE.Vector3().lerpVectors(b, c, t);
-  return new THREE.Vector3().lerpVectors(ab, bc, t);
+function setQuadraticPosition(target, a, b, c, t) {
+  const invT = 1 - t;
+  target.set(
+    invT * invT * a.x + 2 * invT * t * b.x + t * t * c.x,
+    invT * invT * a.y + 2 * invT * t * b.y + t * t * c.y,
+    invT * invT * a.z + 2 * invT * t * b.z + t * t * c.z,
+  );
 }
 
 export function dropStrandBulb(context) {
@@ -820,15 +824,11 @@ function createBulbPickup(color) {
   );
   reflection.rotation.x = -Math.PI / 2;
   reflection.position.y = -BULB_HOVER_OFFSET - 0.02;
-  const light = new THREE.PointLight(new THREE.Color(color), 1.2, 4.2, 2);
-  light.position.set(0, 0, 0);
   group.add(glass);
   group.add(cap);
   group.add(aura);
   group.add(reflection);
-  group.add(light);
   group.userData.aura = aura;
-  group.userData.light = light;
   group.userData.reflection = reflection;
   return group;
 }
@@ -1098,9 +1098,7 @@ function buildStringPreviewMesh(context, anchor, pattern) {
     );
     halo.scale.set(0.8, 0.8, 0.8);
 
-    const light = new three.PointLight(bulbColor, 0.65, 3, 2);
-
-    bulbInfos.push({ mesh: bulb, glow: halo, light });
+    bulbInfos.push({ mesh: bulb, glow: halo });
   }
 
   const preview = new three.Group();
@@ -1108,7 +1106,6 @@ function buildStringPreviewMesh(context, anchor, pattern) {
   bulbInfos.forEach((info) => {
     preview.add(info.mesh);
     preview.add(info.glow);
-    preview.add(info.light);
   });
   preview.userData = { tube: tubeMesh, bulbInfos };
 
